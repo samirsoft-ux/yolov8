@@ -9,7 +9,22 @@ import numpy as np
 
 import supervision as sv
 
+import subprocess
+
 from ultralytics import YOLO
+
+ip_address = "192.168.137.83"
+port = 8080
+ip = "http://{}:{}/video".format(ip_address, port)
+
+try:
+    result = subprocess.run(['python', 'calibracion_mesa.py'], capture_output=True, text=True, check=True)
+    print("Calibración completada exitosamente.\nSalida:", result.stdout)
+except subprocess.CalledProcessError as e:
+    print("Error durante la calibración. Código de salida:", e.returncode)
+    print("Salida de error:", e.stderr)
+    # Aquí puedes decidir cómo manejar el error, por ejemplo, terminar el script
+    exit(1)
 
 COLORS = sv.ColorPalette.default()
 
@@ -19,45 +34,46 @@ class VideoProcessor:
     def __init__(
         self,
         source_weights_path: str,
-        source_video_path: str,
+        ip_address: str,
+        port: int,
         target_video_path: str = None,
         confidence_threshold: float = 0.3,
         iou_threshold: float = 0.7,
     ) -> None:
-        self.source_video_path=args.source_video_path
+        self.ip_address = ip_address
+        self.port = port
         self.target_video_path=args.target_video_path
         self.confidence_threshold=args.confidence_threshold
         self.iou_threshold=args.iou_threshold
     
         self.model = YOLO(source_weights_path)
         
+        self.tracker = sv.ByteTrack()
+        
         self.box_annotator = sv.BoxAnnotator(color=COLORS)
         
     def process_video(self):
-        frame_generator = sv.get_video_frames_generator(
-            source_path=self.source_video_path)
+        video_path = f"http://{self.ip_address}:{self.port}/video"
+        vid = cv2.VideoCapture(video_path)
     
         # Inicializa una variable para almacenar el tiempo del último frame procesado
         prev_frame_time = 0
         # Inicializa una variable para almacenar el tiempo del frame actual
         new_frame_time = 0
     
-        for frame in frame_generator:
-            # Guarda el tiempo actual antes de procesar el frame
-            new_frame_time = time.time()
+        while True:
+            ret, frame = vid.read()
+            if not ret:
+                break
             
+            new_frame_time = time.time()
             processed_frame = self.process_frame(frame=frame)
             
-            # Calcula los FPS
-            fps = 1/(new_frame_time-prev_frame_time)
+            fps = 1/(new_frame_time - prev_frame_time)
             prev_frame_time = new_frame_time
             
-            # Convierte el cálculo de FPS a string para poder mostrarlo
             fps_text = f"FPS: {fps:.2f}"
-            
-            # Muestra los FPS en el frame
             cv2.putText(processed_frame, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 3, cv2.LINE_AA)
-            
             cv2.imshow("frame", processed_frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
@@ -76,8 +92,13 @@ class VideoProcessor:
         self, frame: np.ndarray, detections: sv.Detections
     ) -> np.ndarray:
         annotated_frame = frame.copy()
+        labels = [
+            f"#{tracker_id}" 
+            for tracker_id 
+            in detections.tracker_id
+            ]
         annotated_frame = self.box_annotator.annotate(
-            scene=annotated_frame, detections=detections
+            scene=annotated_frame, detections=detections, labels=labels
         )
         return annotated_frame
     
@@ -88,6 +109,7 @@ class VideoProcessor:
         )[0]
         #TRANSFORMA LOS RESULTADOS EN UN OBJETO "DETECTIONS" CON SUPERVISION DE ROBOFLOW
         detections = sv.Detections.from_ultralytics(results)
+        detections = self.tracker.update_with_detections(detections)
         return self.annotate_frame(frame=frame, detections=detections)
     
 if __name__ == "__main__":
@@ -102,11 +124,17 @@ if __name__ == "__main__":
         type=str,
     )
     parser.add_argument(
-        "--source_video_path",
+        "--ip_address",
         required=True,
-        help="Path to the source video file",
+        help="IP address of the video camera",
         type=str,
-    )
+        )
+    parser.add_argument(
+        "--port",
+        required=True,
+        help="Port of the video stream",
+        type=int,
+        )
     parser.add_argument(
         "--target_video_path",
         default=None,
@@ -126,7 +154,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     processor = VideoProcessor(
         source_weights_path=args.source_weights_path,
-        source_video_path=args.source_video_path,
+        ip_address=args.ip_address,
+        port=args.port,
         target_video_path=args.target_video_path,
         confidence_threshold=args.confidence_threshold,
         iou_threshold=args.iou_threshold,
