@@ -9,6 +9,7 @@ from ultralytics import YOLO
 import threading
 import queue
 import signal  # Importar el módulo signal
+import json
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -31,6 +32,11 @@ class VideoProcessor:
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
 
+        # Carga de las coordenadas de las esquinas de la mesa desde data.json
+        with open('data.json', 'r') as file:
+            data = json.load(file)
+            self.mesa_corners = np.array(data['l_circle_projector'])
+            
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         self.box_annotator = sv.BoxAnnotator(color=COLORS)
@@ -76,17 +82,30 @@ class VideoProcessor:
                 cv2.imshow("Processed Frame", processed_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     self.shutdown_event.set()
-
+    
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         results = self.model(frame, verbose=False, conf=self.confidence_threshold, iou=self.iou_threshold)[0]
         detections = sv.Detections.from_ultralytics(results)
-        detections = self.tracker.update_with_detections(detections)
         
-        # Inspeccionar los atributos de las detecciones
-        #print(dir(detections))  # Ver los métodos y atributos disponibles
-        #print(vars(detections))  # Si es un objeto personalizado, esto podría mostrar su estructura interna    
+        valid_detections_indices = [i for i, bbox in enumerate(detections.xyxy) 
+                                    if cv2.pointPolygonTest(self.mesa_corners, ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2), False) >= 0 
+                                    and detections.class_id[i] in [0, 1]]
         
-        # Continúa con la anotación como antes
+        if valid_detections_indices:
+            # Asegurar que cada componente requerido está disponible antes de intentar indexarlo
+            valid_xyxy = detections.xyxy[valid_detections_indices]
+            valid_class_id = detections.class_id[valid_detections_indices]
+            valid_confidence = detections.confidence[valid_detections_indices] if detections.confidence is not None else None
+            valid_tracker_id = detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None
+
+            # Crear un nuevo objeto Detections con los valores filtrados
+            valid_detections = sv.Detections(xyxy=valid_xyxy, class_id=valid_class_id, confidence=valid_confidence, tracker_id=valid_tracker_id)
+        else:
+            # Asegurar que los arrays vacíos tengan la forma adecuada
+            valid_detections = sv.Detections(xyxy=np.empty((0, 4)), class_id=np.array([], dtype=int), confidence=np.array([], dtype=float), tracker_id=np.array([], dtype=int))
+        
+        detections = self.tracker.update_with_detections(valid_detections)
+    
         annotated_frame = self.annotate_frame(frame=frame, detections=detections)
         return annotated_frame
 
