@@ -81,12 +81,46 @@ class VideoProcessor:
         results = self.model(frame, verbose=False, conf=self.confidence_threshold, iou=self.iou_threshold)[0]
         detections = sv.Detections.from_ultralytics(results)
         detections = self.tracker.update_with_detections(detections)
-        return self.annotate_frame(frame=frame, detections=detections)
+        
+        # Inspeccionar los atributos de las detecciones
+        #print(dir(detections))  # Ver los métodos y atributos disponibles
+        #print(vars(detections))  # Si es un objeto personalizado, esto podría mostrar su estructura interna    
+        
+        # Continúa con la anotación como antes
+        annotated_frame = self.annotate_frame(frame=frame, detections=detections)
+        return annotated_frame
 
-    def annotate_frame(self, frame: np.ndarray, detections: sv.Detections) -> np.ndarray:
+    def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
         annotated_frame = frame.copy()
-        labels = [f"#{tracker_id}" for tracker_id in detections.tracker_id]
-        annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+        
+        for i in range(len(detections.xyxy)):
+            bbox = detections.xyxy[i]
+            class_id = detections.class_id[i]
+            tracker_id = detections.tracker_id[i]
+            
+            x1, y1, x2, y2 = bbox
+            # Asegúrate de que las coordenadas del centro sean enteros
+            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+            radius = int(max(x2 - x1, y2 - y1) / 2)
+            
+            # Bola blanca: dibujar un círculo blanco
+            if class_id == 0:  # Bola blanca
+                cv2.circle(annotated_frame, center, radius, (255, 255, 255), 2)  # Blanco
+                label = f"Bola blanca #{tracker_id}"
+                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Otras bolas: dibujar un círculo azul
+            elif class_id == 1:  # Otras bolas
+                cv2.circle(annotated_frame, center, radius, (255, 0, 0), 2)  # Azul
+                label = f"Bola #{tracker_id}"
+                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Taco de billar: dibujar un rectángulo verde
+            elif class_id == 2:
+                cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)  # Verde
+                label = f"Taco #{tracker_id}"
+                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
         return annotated_frame
 
     def start(self):
