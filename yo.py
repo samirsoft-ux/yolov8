@@ -10,6 +10,7 @@ import threading
 import queue
 import signal  # Importar el módulo signal
 import json
+import pymunk  # Asegúrate de haber instalado Pymunk
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -44,8 +45,15 @@ class VideoProcessor:
         self.frame_queue = queue.Queue(maxsize=10)
         self.shutdown_event = threading.Event()
 
+        self.setup_pymunk()  # Llama a la configuración de Pymunk
+
+    def setup_pymunk(self):
+        self.space = pymunk.Space()
+        self.space.gravity = (0, 0)  # Ajusta la gravedad a tus necesidades
+
     def capture_video(self):
-        video_path = f"http://{self.ip_address}:{self.port}/video"
+        #video_path = f"http://{self.ip_address}:{self.port}/video"
+        video_path = "data/sec.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -80,34 +88,77 @@ class VideoProcessor:
                 cv2.putText(processed_frame, f"Latency: {average_latency*1000:.2f} ms", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 3)
                 
                 cv2.imshow("Processed Frame", processed_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                if cv2.waitKey(150) & 0xFF == ord('q'):
                     self.shutdown_event.set()
     
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         results = self.model(frame, verbose=False, conf=self.confidence_threshold, iou=self.iou_threshold)[0]
         detections = sv.Detections.from_ultralytics(results)
-        
-        valid_detections_indices = [i for i, bbox in enumerate(detections.xyxy) 
-                                    if cv2.pointPolygonTest(self.mesa_corners, ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2), False) >= 0 
-                                    and detections.class_id[i] in [0, 1]]
-        
+
+        # Filtrar las detecciones de las bolas que están dentro del rectángulo de la mesa
+        valid_detections_indices_balls = [i for i, bbox in enumerate(detections.xyxy)
+                                        if cv2.pointPolygonTest(self.mesa_corners, ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2), False) >= 0
+                                        and detections.class_id[i] in [0, 1]]
+
+        # Permitir que las detecciones del taco ocurran en cualquier parte de la imagen
+        valid_detections_indices_cue = [i for i, _ in enumerate(detections.xyxy) if detections.class_id[i] == 2]
+
+        # Combinar los índices de detecciones válidas de bolas y taco
+        valid_detections_indices = valid_detections_indices_balls + valid_detections_indices_cue
+
         if valid_detections_indices:
-            # Asegurar que cada componente requerido está disponible antes de intentar indexarlo
             valid_xyxy = detections.xyxy[valid_detections_indices]
             valid_class_id = detections.class_id[valid_detections_indices]
             valid_confidence = detections.confidence[valid_detections_indices] if detections.confidence is not None else None
             valid_tracker_id = detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None
 
-            # Crear un nuevo objeto Detections con los valores filtrados
             valid_detections = sv.Detections(xyxy=valid_xyxy, class_id=valid_class_id, confidence=valid_confidence, tracker_id=valid_tracker_id)
         else:
-            # Asegurar que los arrays vacíos tengan la forma adecuada
             valid_detections = sv.Detections(xyxy=np.empty((0, 4)), class_id=np.array([], dtype=int), confidence=np.array([], dtype=float), tracker_id=np.array([], dtype=int))
-        
+
         detections = self.tracker.update_with_detections(valid_detections)
-    
-        annotated_frame = self.annotate_frame(frame=frame, detections=detections)
+
+        white_ball_position, cue_positions = self.get_white_ball_and_cue_positions(detections)
+
+        annotated_frame = self.annotate_frame(frame, detections)
+
+        self.process_taco_trajectory(annotated_frame, cue_positions, white_ball_position)
+
         return annotated_frame
+
+    def process_taco_trajectory(self, frame, cue_positions, white_ball_position):
+        for cue_position in cue_positions:
+            _, taco_start, taco_end = self.is_pointing_towards_table(cue_position[2])
+            if white_ball_position:
+                cv2.line(frame, (int(taco_start[0]), int(taco_start[1])), 
+                        (int(white_ball_position[0]), int(white_ball_position[1])), (0, 255, 0), 5)
+    
+    def get_white_ball_and_cue_positions(self, detections):
+        white_ball_position = None
+        cue_positions = []
+
+        for i, class_id in enumerate(detections.class_id):
+            if class_id == 0:  # ID de la bola blanca
+                bbox = detections.xyxy[i]
+                white_ball_position = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+            elif class_id == 2:  # ID del taco
+                bbox = detections.xyxy[i]
+                cue_positions.append(((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2, bbox))
+
+        return white_ball_position, cue_positions
+    
+    def is_pointing_towards_table(self, taco_bbox):
+        mesa_center = np.mean(self.mesa_corners, axis=0)
+        taco_start = (taco_bbox[0], taco_bbox[1])
+        taco_end = (taco_bbox[2], taco_bbox[3])
+
+        distance_start = np.linalg.norm(mesa_center - np.array(taco_start))
+        distance_end = np.linalg.norm(mesa_center - np.array(taco_end))
+
+        if distance_start < distance_end:
+            return True, taco_start, taco_end
+        else:
+            return True, taco_end, taco_start
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
         annotated_frame = frame.copy()
