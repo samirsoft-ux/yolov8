@@ -26,6 +26,16 @@ COLORS = sv.ColorPalette.default()
 # Configura la GPU deseada
 torch.cuda.set_device(0)
 
+# Define una función para calcular la dirección del taco
+def calcular_direccion_taco(ubicaciones_taco):
+    if len(ubicaciones_taco) >= 2:
+        # Calcula la dirección basada en las últimas dos posiciones
+        direccion = np.array(ubicaciones_taco[-1]) - np.array(ubicaciones_taco[-2])
+        norma = np.linalg.norm(direccion)
+        if norma == 0: return None  # Evita división por cero
+        return direccion / norma
+    return None
+
 def visualizar_trayectoria(frame, inicio, fin, color=(0, 255, 255), grosor=2):
     # Asegurarse de que los puntos sean enteros
     inicio = (int(inicio[0]), int(inicio[1]))
@@ -61,23 +71,6 @@ class VideoProcessor:
         # Lista para almacenar referencias a las bolas y el taco en Pymunk
         self.balls = {}
         self.cue = None  # Podrías tener solo una referencia al taco si siempre hay uno
-        self.direcciones_taco = []  # Almacena las últimas direcciones del taco
-
-    # Define una función para calcular la dirección del taco suavizada
-    def calcular_direccion_taco_suavizada(self, nuevas_direcciones):
-        # Agrega la última dirección calculada a la lista
-        self.direcciones_taco.append(nuevas_direcciones)
-        # Limita el tamaño de la lista a las últimas N direcciones
-        if len(self.direcciones_taco) > 30:  # Por ejemplo, N = 5
-            self.direcciones_taco.pop(0)
-        # Calcula el promedio de las direcciones
-        direccion_promedio = np.mean(self.direcciones_taco, axis=0)
-
-        # Calcula la norma de la dirección promedio
-        norma = np.linalg.norm(direccion_promedio)
-        if norma == 0:
-            return None  # Retorna None o alguna dirección predeterminada si la norma es 0
-        return direccion_promedio / norma  # Retorna la dirección normalizada
 
     def update_or_add_ball_in_pymunk(self, detection, index):
         # Obtén el ID de seguimiento de la bola
@@ -122,8 +115,8 @@ class VideoProcessor:
         return shape
 
     def capture_video(self):
-        video_path = f"http://{self.ip_address}:{self.port}/video"
-        #video_path = "data/sec.mp4"
+        #video_path = f"http://{self.ip_address}:{self.port}/video"
+        video_path = "data/sec.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -198,31 +191,23 @@ class VideoProcessor:
                             tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
 
     def handle_detections(self, frame, detections):
-        # Procesa cada detección para bolas y actualiza en Pymunk según sea necesario
         for i in range(len(detections.xyxy)):
             bbox = detections.xyxy[i]
             class_id = detections.class_id[i]
             tracker_id = detections.tracker_id[i]
-
+            
             if class_id in [0, 1]:  # Bolas
                 self.update_or_add_ball_in_pymunk(detections, i)
             elif class_id == 2:  # Taco
                 centro_taco = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
                 self.ubicaciones_taco.append(centro_taco)
                 if len(self.ubicaciones_taco) > 1:
-                    direccion_suavizada = self.calcular_direccion_taco_suavizada(np.array(centro_taco) - np.array(self.ubicaciones_taco[-2]))
-                    if direccion_suavizada is not None:
-                        punto_final = (centro_taco[0] + direccion_suavizada[0] * 100, centro_taco[1] + direccion_suavizada[1] * 100)
+                    direccion = calcular_direccion_taco(self.ubicaciones_taco)
+                    if direccion is not None:
+                        punto_final = (centro_taco[0] + direccion[0] * 100, centro_taco[1] + direccion[1] * 100)
                         visualizar_trayectoria(frame, centro_taco, punto_final)
-
-        # Si hay ubicaciones de taco registradas, verifica intersecciones y simula trayectorias
-        if self.ubicaciones_taco:
-            ultimo_taco = self.ubicaciones_taco[-1]
-            if len(self.ubicaciones_taco) > 1:
-                direccion_taco_suavizada = self.calcular_direccion_taco_suavizada(np.array(ultimo_taco) - np.array(self.ubicaciones_taco[-2]))
-                if direccion_taco_suavizada is not None:
-                    fin_taco = (ultimo_taco[0] + direccion_taco_suavizada[0] * 100, ultimo_taco[1] + direccion_taco_suavizada[1] * 100)
-                    self.verificar_interseccion_y_simular(frame, ultimo_taco, fin_taco, detections)
+        
+        self.simulate_and_draw_trajectories(frame)
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
         annotated_frame = frame.copy()
@@ -257,58 +242,6 @@ class VideoProcessor:
         
         return annotated_frame
 
-    def verificar_interseccion_y_simular(self, frame, inicio_taco, fin_taco, detections):
-        direccion_impacto = np.array(fin_taco) - np.array(inicio_taco)
-        direccion_impacto_normalizada = direccion_impacto / np.linalg.norm(direccion_impacto)
-
-        for i, bbox in enumerate(detections.xyxy):
-            class_id = detections.class_id[i]
-            if class_id in [0, 1]:  # Bolas
-                centro_bola = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-                radius = (bbox[2] - bbox[0]) / 2
-                if self.intersecta_trayectoria_con_bola(inicio_taco, fin_taco, centro_bola, radius):
-                    # Simula la trayectoria de la bola impactada. Necesitas calcular esta parte.
-                    # Por ejemplo, asumimos que la bola se moverá en la misma dirección del impacto por simplicidad
-                    punto_final_simulado = (centro_bola[0] + direccion_impacto_normalizada[0] * 100, centro_bola[1] + direccion_impacto_normalizada[1] * 100)
-
-                    # Dibuja la trayectoria simulada
-                    cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(punto_final_simulado[0]), int(punto_final_simulado[1])), (255, 0, 0), 2)
-
-                    # Opcional: Actualiza la posición de la bola en Pymunk si es necesario
-                    #self.update_or_add_ball_in_pymunk(detections, i)
-
-    def intersecta_trayectoria_con_bola(self, inicio_taco, fin_taco, centro_bola, radius):
-        # Convertir puntos a numpy arrays para facilitar el cálculo
-        p1 = np.array(inicio_taco)
-        p2 = np.array(fin_taco)
-        centro = np.array(centro_bola)
-
-        # Calcular la distancia del centro de la bola a la línea de trayectoria
-        d = np.linalg.norm(np.cross(p2-p1, p1-centro)) / np.linalg.norm(p2-p1)
-
-        # Verificar si la distancia es menor que el radio de la bola
-        return d <= radius
-    
-    def simular_trayectoria_bola_impactada(self, centro_bola, radius, direccion_impacto, frame):
-        # Asumiendo que tenemos un identificador único para cada bola (podría ser su posición inicial)
-        bola_id = f"bola_{centro_bola}"
-
-        # Verificar si la bola ya está en Pymunk, si no, agregarla
-        if bola_id not in self.balls:
-            self.balls[bola_id] = self.add_ball(centro_bola, radius)
-        
-        # Aplicar fuerza en la dirección del impacto
-        fuerza = 1000 * np.array(direccion_impacto)  # Este valor de fuerza es arbitrario
-        self.balls[bola_id].body.apply_impulse_at_local_point(fuerza)
-
-        # Simular por un corto tiempo para calcular la nueva posición
-        for _ in range(10):
-            self.space.step(1/50.0)
-
-        # Dibujar la nueva posición de la bola
-        nueva_posicion = self.balls[bola_id].body.position
-        cv2.circle(frame, (int(nueva_posicion.x), int(nueva_posicion.y)), int(radius), (255, 0, 0), 2)  # Dibuja en azul
-    
     def start(self):
         def signal_handler(sig, frame):
             print('Deteniendo los hilos...')
