@@ -10,6 +10,10 @@ import threading
 import queue
 import signal  # Importar el módulo signal
 import json
+import pymunk
+import pygame
+import pymunk.pygame_util
+from pymunk.vec2d import Vec2d
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -31,18 +35,79 @@ class VideoProcessor:
         self.port = port
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
+        
         # Carga de las coordenadas de las esquinas de la mesa desde data.json
         with open('data.json', 'r') as file:
             data = json.load(file)
-            self.mesa_corners = np.array(data['l_circle_projector'])
+            self.mesa_corners = self.reordenar_esquinas(np.array(data['l_circle_projector']))
+        
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         self.box_annotator = sv.BoxAnnotator(color=COLORS)
         self.frame_queue = queue.Queue(maxsize=10)
         self.shutdown_event = threading.Event()
+        self.space = self.setup_space()  # Configura el espacio de simulación de Pymunk
         self.historial_lineas = []  # Para almacenar las últimas posiciones y ángulos de la línea
         self.max_historial = 3  # Número máximo de elementos en el historial
         self.ultimo_angulo_valido = None # En tu inicialización de clase, agrega un valor para rastrear el último ángulo válido
+    
+    # Función para reordenar las esquinas
+    def reordenar_esquinas(self, corners):
+        # Asumimos que corners es una lista de puntos (x, y) que representan las esquinas de la mesa
+
+        # Paso 1: Encontrar el centroide de todos los puntos
+        centroide = np.mean(corners, axis=0)
+
+        # Paso 2: Calcular el ángulo de cada punto respecto al centroide
+        # La función atan2 retorna el ángulo entre el eje x positivo y el punto (y, x), siendo y vertical y x horizontal
+        angulos = np.arctan2(corners[:, 1] - centroide[1], corners[:, 0] - centroide[0])
+
+        # Paso 3: Ordenar los puntos basados en su ángulo respecto al centroide
+        # Esto asegura un ordenamiento consecutivo alrededor del centroide
+        orden = np.argsort(angulos)
+
+        # Paso 4: Reordenar los puntos usando el índice obtenido
+        corners_ordenados = corners[orden]
+
+        return corners_ordenados
+    
+    def setup_space(self):
+        space = pymunk.Space()
+        space.gravity = (0, 0)  # No hay gravedad en una mesa de billar
+
+        # Añadir bordes de la mesa como objetos estáticos
+        for i in range(len(self.mesa_corners)):
+            # Tomar cada par de puntos consecutivos como un segmento
+            start = tuple(self.mesa_corners[i])  # Convertir a tupla
+            end = tuple(self.mesa_corners[(i + 1) % len(self.mesa_corners)])  # Convertir a tupla y ciclo al primer punto después del último
+            
+            shape = pymunk.Segment(space.static_body, start, end, 0.5)  # 0.5 es el grosor del borde
+            shape.elasticity = 1.0  # Coeficiente de restitución para simular el rebote de las bolas
+            space.add(shape)
+
+        return space
+    
+    """def visualizar_bordes_mesa(self, dimensiones_pantalla=(1920, 1080)):
+        print(self.mesa_corners)
+        pygame.init()
+        pantalla = pygame.display.set_mode(dimensiones_pantalla)
+        reloj = pygame.time.Clock()
+        corriendo = True
+
+        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
+
+        while corriendo:
+            for evento in pygame.event.get():
+                if evento.type == pygame.QUIT:
+                    corriendo = False
+
+            pantalla.fill((255, 255, 255))  # Fondo blanco
+            self.space.debug_draw(draw_options)  # Dibuja los objetos de Pymunk
+
+            pygame.display.flip()  # Actualiza la pantalla
+            reloj.tick(60)  # Limita a 60 FPS
+
+        pygame.quit()"""
     
     def suavizar_linea(self):
         if len(self.historial_lineas) == 0:
@@ -262,5 +327,5 @@ if __name__ == "__main__":
                                port=args.port,
                                confidence_threshold=args.confidence_threshold,
                                iou_threshold=args.iou_threshold)
-
+    #processor.visualizar_bordes_mesa()
     processor.start()
