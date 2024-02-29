@@ -32,6 +32,13 @@ def visualizar_trayectoria(frame, inicio, fin, color=(0, 255, 255), grosor=2):
     fin = (int(fin[0]), int(fin[1]))
     cv2.line(frame, inicio, fin, color, grosor)
 
+
+
+def visualizar_trayectoria(frame, inicio, fin, color=(0, 255, 255), grosor=2):
+    cv2.line(frame, inicio, fin, color, grosor)
+
+
+
 class VideoProcessor:
     def __init__(self, source_weights_path: str, ip_address: str, port: int, confidence_threshold: float = 0.3, iou_threshold: float = 0.7):
         self.ip_address = ip_address
@@ -63,12 +70,18 @@ class VideoProcessor:
         self.cue = None  # Podrías tener solo una referencia al taco si siempre hay uno
         self.direcciones_taco = []  # Almacena las últimas direcciones del taco
 
+        self.historial_lineas = []  # Para almacenar las últimas posiciones y ángulos de la línea
+        self.max_historial = 48  # Número máximo de elementos en el historial
+
+        # En tu inicialización de clase, agrega un valor para rastrear el último ángulo válido
+        self.ultimo_angulo_valido = None
+
     # Define una función para calcular la dirección del taco suavizada
-    def calcular_direccion_taco_suavizada(self, nuevas_direcciones):
+    """def calcular_direccion_taco_suavizada(self, nuevas_direcciones):
         # Agrega la última dirección calculada a la lista
         self.direcciones_taco.append(nuevas_direcciones)
         # Limita el tamaño de la lista a las últimas N direcciones
-        if len(self.direcciones_taco) > 30:  # Por ejemplo, N = 5
+        if len(self.direcciones_taco) > 35:  # Por ejemplo, N = 5
             self.direcciones_taco.pop(0)
         # Calcula el promedio de las direcciones
         direccion_promedio = np.mean(self.direcciones_taco, axis=0)
@@ -77,7 +90,28 @@ class VideoProcessor:
         norma = np.linalg.norm(direccion_promedio)
         if norma == 0:
             return None  # Retorna None o alguna dirección predeterminada si la norma es 0
-        return direccion_promedio / norma  # Retorna la dirección normalizada
+        return direccion_promedio / norma  # Retorna la dirección normalizada"""
+
+    """def suavizar_linea(self):
+        if len(self.historial_lineas) == 0:
+            return None, None  # No hay suficiente información para suavizar
+        centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
+        angulo_promedio = np.mean([angulo for _, angulo in self.historial_lineas])
+        return centro_promedio, angulo_promedio"""
+    
+    def suavizar_linea(self):
+        if len(self.historial_lineas) == 0:
+            return None, None
+        centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
+        angulo_promedio = np.mean([angulo for _, angulo in self.historial_lineas])
+
+        # Limita el cambio de ángulo para evitar saltos bruscos
+        if self.ultimo_angulo_valido is not None:
+            delta_angulo = min(10, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
+            angulo_promedio = self.ultimo_angulo_valido + np.sign(angulo_promedio - self.ultimo_angulo_valido) * delta_angulo
+
+        self.ultimo_angulo_valido = angulo_promedio
+        return centro_promedio, angulo_promedio
 
     def update_or_add_ball_in_pymunk(self, detection, index):
         # Obtén el ID de seguimiento de la bola
@@ -122,8 +156,8 @@ class VideoProcessor:
         return shape
 
     def capture_video(self):
-        video_path = f"http://{self.ip_address}:{self.port}/video"
-        #video_path = "data/sec.mp4"
+        #video_path = f"http://{self.ip_address}:{self.port}/video"
+        video_path = "data/len2.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -197,32 +231,372 @@ class VideoProcessor:
                             confidence=detections.confidence[valid_detections_indices] if detections.confidence is not None else None,
                             tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
 
-    def handle_detections(self, frame, detections):
-        # Procesa cada detección para bolas y actualiza en Pymunk según sea necesario
-        for i in range(len(detections.xyxy)):
-            bbox = detections.xyxy[i]
+    """def calcular_centro_mesa(self):
+        # Asumiendo que self.mesa_corners contiene las coordenadas de las esquinas de la mesa
+        # cargadas desde 'l_circle_projector' en data.json
+        esquinas = np.array(self.mesa_corners)  # Convertir a numpy array para facilitar los cálculos
+        centro_x = np.mean(esquinas[:, 0])
+        centro_y = np.mean(esquinas[:, 1])
+        return centro_x, centro_y"""
+
+    def calcular_centro_mesa_genérico(self, frame):
+        altura, anchura = frame.shape[:2]  # Obtiene las dimensiones del frame
+        centro_mesa_x = anchura // 2  # Calcula el centro en X
+        centro_mesa_y = altura // 2   # Calcula el centro en Y
+        return centro_mesa_x, centro_mesa_y
+
+    """def handle_detections(self, frame, detections):
+        # Calcula el centro de la mesa de manera genérica
+        centro_mesa_x, centro_mesa_y = self.calcular_centro_mesa_genérico(frame)
+        
+        for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
-            tracker_id = detections.tracker_id[i]
+            
+            if class_id == 2:  # Si es un taco
+                centro_taco_x = (bbox[0] + bbox[2]) / 2
+                centro_taco_y = (bbox[1] + bbox[3]) / 2
+                
+                # Determinar la dirección general del taco basada en su posición relativa al centro de la mesa
+                if centro_taco_x < centro_mesa_x:
+                    # Supongamos que el taco está a la izquierda del centro y se moverá hacia la derecha
+                    direccion_taco = [1, 0]  # Derecha
+                elif centro_taco_x > centro_mesa_x:
+                    # Supongamos que el taco está a la derecha del centro y se moverá hacia la izquierda
+                    direccion_taco = [-1, 0]  # Izquierda
+                elif centro_taco_y < centro_mesa_y:
+                    # Supongamos que el taco está arriba del centro y se moverá hacia abajo
+                    direccion_taco = [0, 1]  # Abajo
+                elif centro_taco_y > centro_mesa_y:
+                    # Supongamos que el taco está abajo del centro y se moverá hacia arriba
+                    direccion_taco = [0, -1]  # Arriba
 
-            if class_id in [0, 1]:  # Bolas
-                self.update_or_add_ball_in_pymunk(detections, i)
-            elif class_id == 2:  # Taco
-                centro_taco = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-                self.ubicaciones_taco.append(centro_taco)
-                if len(self.ubicaciones_taco) > 1:
-                    direccion_suavizada = self.calcular_direccion_taco_suavizada(np.array(centro_taco) - np.array(self.ubicaciones_taco[-2]))
-                    if direccion_suavizada is not None:
-                        punto_final = (centro_taco[0] + direccion_suavizada[0] * 100, centro_taco[1] + direccion_suavizada[1] * 100)
-                        visualizar_trayectoria(frame, centro_taco, punto_final)
+                # Calcula la posición final basada en la dirección y la longitud deseada de la proyección
+                longitud_proyeccion = 100  # Longitud arbitraria de la proyección de la dirección
+                punto_final = (centro_taco_x + direccion_taco[0] * longitud_proyeccion, centro_taco_y + direccion_taco[1] * longitud_proyeccion)
+                
+                # Dibuja la trayectoria del taco en el frame
+                visualizar_trayectoria(frame, (centro_taco_x, centro_taco_y), punto_final, color=(0, 255, 255), grosor=2)"""
+                
+    """def handle_detections(self, frame, detections):
+        centro_mesa_x, centro_mesa_y = self.calcular_centro_mesa_genérico(frame)
+        
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            
+            if class_id == 2:  # Taco
+                centro_taco_x = (bbox[0] + bbox[2]) / 2
+                centro_taco_y = (bbox[1] + bbox[3]) / 2
+                
+                if not self.ubicaciones_taco:
+                    self.ubicaciones_taco.append((centro_taco_x, centro_taco_y))
+                    return  # Espera hasta tener al menos dos puntos para determinar la dirección
+                    
+                ultima_posicion = self.ubicaciones_taco[-1]
+                self.ubicaciones_taco.append((centro_taco_x, centro_taco_y))
+                
+                # Calcular la dirección del movimiento
+                delta_x = centro_taco_x - ultima_posicion[0]
+                delta_y = centro_taco_y - ultima_posicion[1]
+                
+                # Determinar la dirección predominante del movimiento
+                if abs(delta_x) > abs(delta_y):
+                    direccion_taco = [np.sign(delta_x), 0]  # Movimiento predominante horizontal
+                else:
+                    direccion_taco = [0, np.sign(delta_y)]  # Movimiento predominante vertical
+                
+                # Calcula la posición final basada en la dirección predominante
+                punto_final = (centro_taco_x + direccion_taco[0] * 100, centro_taco_y + direccion_taco[1] * 100)
+                
+                # Dibuja la trayectoria del taco en el frame
+                visualizar_trayectoria(frame, (centro_taco_x, centro_taco_y), punto_final, color=(0, 255, 255), grosor=2)"""
+                
+    """def handle_detections(self, frame, detections):
+        centro_mesa_x, centro_mesa_y = self.calcular_centro_mesa_genérico(frame)
+        
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            
+            if class_id == 2:  # Taco
+                centro_taco_x = (bbox[0] + bbox[2]) / 2
+                centro_taco_y = (bbox[1] + bbox[3]) / 2
+                
+                # Asegurar que tenemos la posición inicial del taco para determinar su lado de entrada
+                if len(self.ubicaciones_taco) == 0:
+                    self.ubicaciones_taco.append((centro_taco_x, centro_taco_y))
+                    # Determina el lado de entrada del taco basado en la posición inicial
+                    if centro_taco_x < centro_mesa_x:
+                        self.direccion_entrada_taco = "izquierda"
+                    elif centro_taco_x > centro_mesa_x:
+                        self.direccion_entrada_taco = "derecha"
+                    elif centro_taco_y < centro_mesa_y:
+                        self.direccion_entrada_taco = "arriba"
+                    else:
+                        self.direccion_entrada_taco = "abajo"
+                else:
+                    self.ubicaciones_taco.append((centro_taco_x, centro_taco_y))
+                
+                # Proyectar la trayectoria basada en el lado de entrada del taco
+                if self.direccion_entrada_taco == "izquierda":
+                    direccion_taco = [1, 0]  # Derecha
+                elif self.direccion_entrada_taco == "derecha":
+                    direccion_taco = [-1, 0]  # Izquierda
+                elif self.direccion_entrada_taco == "arriba":
+                    direccion_taco = [0, 1]  # Abajo
+                else:  # "abajo"
+                    direccion_taco = [0, -1]  # Arriba
+                
+                # Calcula la posición final basada en la dirección
+                punto_final = (centro_taco_x + direccion_taco[0] * 100, centro_taco_y + direccion_taco[1] * 100)
+                
+                # Dibuja la trayectoria del taco en el frame
+                visualizar_trayectoria(frame, (centro_taco_x, centro_taco_y), punto_final, color=(0, 255, 255), grosor=2)"""
 
-        # Si hay ubicaciones de taco registradas, verifica intersecciones y simula trayectorias
-        if self.ubicaciones_taco:
-            ultimo_taco = self.ubicaciones_taco[-1]
-            if len(self.ubicaciones_taco) > 1:
-                direccion_taco_suavizada = self.calcular_direccion_taco_suavizada(np.array(ultimo_taco) - np.array(self.ubicaciones_taco[-2]))
-                if direccion_taco_suavizada is not None:
-                    fin_taco = (ultimo_taco[0] + direccion_taco_suavizada[0] * 100, ultimo_taco[1] + direccion_taco_suavizada[1] * 100)
-                    self.verificar_interseccion_y_simular(frame, ultimo_taco, fin_taco, detections)
+    """def handle_detections(self, frame, detections):
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                # Extraer la región de interés (ROI) donde se detecta el taco
+                roi = frame[y1:y2, x1:x2]
+
+                # Convertir la ROI a escala de grises
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                
+                # Suavizar la ROI para reducir el ruido
+                blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+
+                # Aplicar umbralización de Otsu para obtener una imagen binaria clara
+                _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                # Preparar una imagen negra del tamaño del frame original
+                black_image = np.zeros_like(frame)
+
+                # Colocar la imagen binaria procesada (ROI) en la imagen negra
+                # Asegurarse de que la ROI binaria se convierta de nuevo a BGR para coincidir con el frame
+                black_image[y1:y1+binary_roi.shape[0], x1:x1+binary_roi.shape[1]] = cv2.cvtColor(binary_roi, cv2.COLOR_GRAY2BGR)
+
+                # Devolver la imagen negra con el taco binario resaltado
+                return black_image
+
+        # Si no hay detecciones de taco, devolver el frame original
+        return frame"""
+
+    ## EL QUE MÁS ME SIRVIO
+
+    """def handle_detections(self, frame, detections):
+        centro_mesa_x, centro_mesa_y = self.calcular_centro_mesa_genérico(frame)
+
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+
+                # Asegurar que las coordenadas del recorte estén dentro de los límites de la imagen
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+
+                # Verificar que el recorte tenga un tamaño válido
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    
+                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    if contornos:
+                        contorno_taco = max(contornos, key=cv2.contourArea)
+                        rect = cv2.minAreaRect(contorno_taco)
+                        box = cv2.boxPoints(rect)
+                        box = np.int32(box)
+                        # Ajustar las coordenadas del box al frame completo
+                        box_global = box + [x1, y1]
+                        cv2.drawContours(frame, [box_global], 0, (0, 0, 255), 2)  # Dibuja el rectángulo en rojo
+
+                        centro, (ancho, alto), angulo = rect
+                        if ancho < alto:
+                            angulo += 90  # Ajustar el ángulo si el rectángulo está más orientado verticalmente
+
+                        # Agregar el centro y ángulo actual al historial
+                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
+                        if len(self.historial_lineas) > self.max_historial:
+                            self.historial_lineas.pop(0)
+
+                        # Suavizar la línea usando el historial
+                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
+
+                        if centro_suavizado is not None and angulo_suavizado is not None:
+                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                            longitud_linea = max(frame.shape) * 2
+                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
+                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
+                            
+                            # Determinar cuál de los puntos está más cerca al centro de la mesa
+                            if np.linalg.norm(punto_inicio_suavizado - np.array([centro_mesa_x, centro_mesa_y])) < np.linalg.norm(punto_final_suavizado - np.array([centro_mesa_x, centro_mesa_y])):
+                                punto_cercano = punto_inicio_suavizado
+                                punto_lejano = punto_final_suavizado
+                            else:
+                                punto_cercano = punto_final_suavizado
+                                punto_lejano = punto_inicio_suavizado
+
+                            # Dibujar solo la mitad de la línea más cercana al centro de la mesa
+                            cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_cercano)), (0, 255, 0), 2)
+                            
+                            # Dibujar la línea descartada en otro color
+                            cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_lejano)), (0, 0, 255), 2)
+                else:
+                    print("ROI vacío o de tamaño inválido.")
+        return frame"""
+        
+    def handle_detections(self, frame, detections):
+        centro_mesa_x, centro_mesa_y = self.calcular_centro_mesa_genérico(frame)
+
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+
+                # Asegurar que las coordenadas del recorte estén dentro de los límites de la imagen
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+
+                # Verificar que el recorte tenga un tamaño válido
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    
+                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    if contornos:
+                        contorno_taco = max(contornos, key=cv2.contourArea)
+                        rect = cv2.minAreaRect(contorno_taco)
+                        box = cv2.boxPoints(rect)
+                        box = np.int32(box)
+                        # Ajustar las coordenadas del box al frame completo
+                        box_global = box + [x1, y1]
+                        cv2.drawContours(frame, [box_global], 0, (0, 0, 255), 2)  # Dibuja el rectángulo en rojo con grosor de 20
+
+                        #centro, _, angulo = rect
+                        #if angulo < -45:
+                        #    angulo += 90
+
+                        centro, (ancho, alto), angulo = rect
+                        if ancho < alto:
+                            angulo += 90  # Ajustar el ángulo si el rectángulo está más orientado verticalmente
+
+                        
+                        # Agregar el centro y angulo actual al historial
+                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
+                        if len(self.historial_lineas) > self.max_historial:
+                            self.historial_lineas.pop(0)
+
+                        # Suavizar la línea usando el historial
+                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
+
+                        if centro_suavizado is not None and angulo_suavizado is not None:
+                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                            longitud_linea = max(frame.shape) * 2
+                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
+                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
+
+                            # Dibujar la línea completa
+                            cv2.line(frame, tuple(np.int32(punto_inicio_suavizado)), tuple(np.int32(punto_final_suavizado)), (0, 255, 0), 2)
+                else:
+                    print("ROI vacío o de tamaño inválido.")
+        return frame
+        
+    """def handle_detections(self, frame, detections):
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = map(int, [bbox[0], bbox[1], bbox[2], bbox[3]])
+                x1, y1 = max(x1, 0), max(y1, 0)
+                x2, y2 = min(x2, frame.shape[1]), min(y2, frame.shape[0])
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                roi = frame[y1:y2, x1:x2]
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                edges = cv2.Canny(blurred_roi, 50, 150)
+                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # Calcular el centroide de la detección del taco
+                centroide_taco = ((x1 + x2) / 2, (y1 + y2) / 2)
+
+                if contours:
+                    selected_contour = None
+                    max_alignment = 0  # Inicializar el máximo alineamiento con un valor bajo
+
+                    for contour in contours:
+                        M = cv2.moments(contour)
+                        if M["m00"] != 0:
+                            cx = int(M["m10"] / M["m00"])
+                            cy = int(M["m01"] / M["m00"])
+                            centroide_contorno = (cx, cy)
+
+                            # Calcular la alineación respecto a la dirección horizontal
+                            # En este ejemplo, simplemente comparamos la coordenada y del centroide del contorno
+                            # con la coordenada y del centroide del taco para simular una "dirección deseada"
+                            alignment = abs(centroide_contorno[1] - centroide_taco[1])
+
+                            if alignment > max_alignment:
+                                max_alignment = alignment
+                                selected_contour = contour
+
+                    # Dibujar el contorno seleccionado
+                    if selected_contour is not None:
+                        cv2.drawContours(roi, [selected_contour], -1, (0, 255, 0), 2)
+
+                frame[y1:y2, x1:x2] = roi"""
+        
+    """def handle_detections(self, frame, detections):
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                # Extraer la región de interés (ROI)
+                roi = frame[y1:y2, x1:x2]
+
+                # Convertir a escala de grises y umbralizar
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                _, binary_roi = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                # Encontrar contornos en la ROI
+                contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # Suponiendo que el contorno más grande es el taco
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    topmost = tuple(c[c[:,:,1].argmin()][0])
+                    bottommost = tuple(c[c[:,:,1].argmax()][0])
+                    
+                    # Calcular la dirección de la línea
+                    vector_dir = np.array(bottommost) - np.array(topmost)
+                    vector_dir_normalized = vector_dir / np.linalg.norm(vector_dir)
+                    
+                    # Definir el tamaño fijo para la línea a dibujar
+                    line_length = 200  # Tamaño fijo de la línea
+                    
+                    # Calcular los puntos finales de la línea extendida
+                    line_start = (np.array(topmost) - vector_dir_normalized * line_length).astype(int)
+                    line_end = (np.array(bottommost) + vector_dir_normalized * line_length).astype(int)
+
+                    # Ajustar los puntos para que se dibujen en el frame completo, no solo en la ROI
+                    line_start_global = (line_start[0] + x1, line_start[1] + y1)
+                    line_end_global = (line_end[0] + x1, line_end[1] + y1)
+                    
+                    # Dibujar la línea en el frame completo
+                    cv2.line(frame, tuple(line_start_global), tuple(line_end_global), (0, 255, 0), 2)
+
+        return frame"""
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
         annotated_frame = frame.copy()
