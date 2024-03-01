@@ -11,6 +11,10 @@ import queue
 import signal  # Importar el módulo signal
 import json
 import pymunk
+import pygame
+import pymunk.pygame_util
+from pygame.locals import QUIT
+import time
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -32,28 +36,180 @@ class VideoProcessor:
         self.port = port
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
-
+        
         # Carga de las coordenadas de las esquinas de la mesa desde data.json
         with open('data.json', 'r') as file:
             data = json.load(file)
-            self.mesa_corners = np.array(data['l_circle_projector'])
-            
+            self.mesa_corners = self.reordenar_esquinas(np.array(data['l_circle_projector']))
+        
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         self.box_annotator = sv.BoxAnnotator(color=COLORS)
-
         self.frame_queue = queue.Queue(maxsize=10)
         self.shutdown_event = threading.Event()
+        self.space = self.setup_space()  # Configura el espacio de simulación de Pymunk
+        self.historial_lineas = []  # Para almacenar las últimas posiciones y ángulos de la línea
+        self.max_historial = 3  # Número máximo de elementos en el historial
+        self.ultimo_angulo_valido = None # En tu inicialización de clase, agrega un valor para rastrear el último ángulo válido
+    
+        #Inicializaciones para simulación 2D
+        self.ball_updates = {}  # Para almacenar las actualizaciones de las bolas antes de aplicarlas
+        self.balls = {}  # Para almacenar las bolas presentes en el espacio de simulación
+        self.active_balls = []  # Lista para mantener los IDs de las bolas activas (detectadas)
+        #Calculo Radio 
+        self.initial_frames_for_average = 10  # Número de frames para calcular el promedio
+        self.detected_radii = []  # Para acumular los radios detectados
+        self.frames_processed = 0  # Contador de frames procesados
+        #Problemas de seguridad
+        self.balls_to_remove = set()
+    def add_ball_to_space(self, position, radius=10, mass=1):
+        """
+        Añade una bola al espacio de Pymunk y devuelve su objeto Circle.
+        """
+        moment = pymunk.moment_for_circle(mass, 0, radius, (0, 0))
+        body = pymunk.Body(mass, moment)
+        body.position = position
+        shape = pymunk.Circle(body, radius)
+        shape.elasticity = 0.95  # Coeficiente de elasticidad de la bola
+        self.space.add(body, shape)
+        return shape
+    
+    def prepare_ball_update(self, tracker_id, position, radius=None):
+        if radius is None:
+            # Usa el radio promedio si está disponible, de lo contrario usa un valor fijo
+            radius = getattr(self, 'average_ball_radius', 18)
+        self.ball_updates[tracker_id] = (position, radius)
+    
+    """def process_ball_updates(self, space, data):
         
-        self.taco_positions = []  # Lista para almacenar las posiciones de la punta del taco
+        #Post-step callback para actualizar o añadir bolas al espacio de Pymunk.
+        
+        for tracker_id, (position, radius) in self.ball_updates.items():
+            if tracker_id in self.balls:
+                self.balls[tracker_id].body.position = position
+            else:
+                self.balls[tracker_id] = self.add_ball_to_space(position, radius)
+        self.ball_updates.clear()"""
+    
+    def process_ball_updates(self, space, data):
+        # Añadir o actualizar bolas
+        for tracker_id, (position, radius) in self.ball_updates.items():
+            if tracker_id in self.balls:
+                # Actualiza la posición de la bola existente
+                self.balls[tracker_id].body.position = position
+            else:
+                # Añade una nueva bola al espacio
+                self.balls[tracker_id] = self.add_ball_to_space(position, radius, tracker_id)  # Asegúrate de que esta función no modifique directamente el espacio
+        self.ball_updates.clear()
 
-        self.average_ball_radius = None  # Inicializar el radio promedio de las bolas como None
-        self.space = pymunk.Space()  # Crear espacio de simulación aquí
-        self.space.gravity = (0, 0)  # Definir gravedad, si necesaria
-        self.ball_shapes = {}  # Diccionario para mantener las formas de las bolas por tracker_id        
+        # Eliminar bolas no detectadas
+        current_active_balls = self.getCurrentActiveBalls()  # Asumiendo que esta función devuelve los tracker_id de las bolas actualmente activas
+        balls_to_remove = [ball_id for ball_id in self.balls if ball_id not in current_active_balls]
+        for ball_id in balls_to_remove:
+            ball_shape = self.balls[ball_id]
+            space.remove(ball_shape.body, ball_shape)  # Elimina la bola del espacio
+            del self.balls[ball_id]
+    
+    def getCurrentActiveBalls(self):
+        # Retorna la lista actual de tracker_id de bolas activas
+        return self.active_balls
+    
+    """def remove_undetected_balls(self, current_active_balls):
+        balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
+
+        for ball_id in balls_to_remove:
+            ball_shape = self.balls[ball_id]
+            self.space.remove(ball_shape.body, ball_shape)  # Elimina la bola del espacio
+            del self.balls[ball_id]  # Elimina la referencia de la bola"""
+            
+    def remove_undetected_balls(self, current_active_balls):
+        balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
+        self.balls_to_remove.update(balls_to_remove)
+    
+    """def update_or_add_ball(self, tracker_id, position, radius=10):
+        
+        #Actualiza la posición de una bola existente o la añade si no existe.
+        
+        if tracker_id in self.balls:
+            self.balls[tracker_id].body.position = position
+        else:
+            self.balls[tracker_id] = self.add_ball_to_space(position, radius)"""
+    
+    # Función para reordenar las esquinas
+    def reordenar_esquinas(self, corners):
+        # Asumimos que corners es una lista de puntos (x, y) que representan las esquinas de la mesa
+
+        # Paso 1: Encontrar el centroide de todos los puntos
+        centroide = np.mean(corners, axis=0)
+
+        # Paso 2: Calcular el ángulo de cada punto respecto al centroide
+        # La función atan2 retorna el ángulo entre el eje x positivo y el punto (y, x), siendo y vertical y x horizontal
+        angulos = np.arctan2(corners[:, 1] - centroide[1], corners[:, 0] - centroide[0])
+
+        # Paso 3: Ordenar los puntos basados en su ángulo respecto al centroide
+        # Esto asegura un ordenamiento consecutivo alrededor del centroide
+        orden = np.argsort(angulos)
+
+        # Paso 4: Reordenar los puntos usando el índice obtenido
+        corners_ordenados = corners[orden]
+
+        return corners_ordenados
+    
+    def setup_space(self):
+        space = pymunk.Space()
+        space.gravity = (0, 0)  # No hay gravedad en una mesa de billar
+
+        # Añadir bordes de la mesa como objetos estáticos
+        for i in range(len(self.mesa_corners)):
+            # Tomar cada par de puntos consecutivos como un segmento
+            start = tuple(self.mesa_corners[i])  # Convertir a tupla
+            end = tuple(self.mesa_corners[(i + 1) % len(self.mesa_corners)])  # Convertir a tupla y ciclo al primer punto después del último
+            
+            shape = pymunk.Segment(space.static_body, start, end, 0.5)  # 0.5 es el grosor del borde
+            shape.elasticity = 1.0  # Coeficiente de restitución para simular el rebote de las bolas
+            space.add(shape)
+
+        return space
+    
+    """def visualizar_bordes_mesa(self, dimensiones_pantalla=(1920, 1080)):
+        print(self.mesa_corners)
+        pygame.init()
+        pantalla = pygame.display.set_mode(dimensiones_pantalla)
+        reloj = pygame.time.Clock()
+        corriendo = True
+
+        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
+
+        while corriendo:
+            for evento in pygame.event.get():
+                if evento.type == pygame.QUIT:
+                    corriendo = False
+
+            pantalla.fill((255, 255, 255))  # Fondo blanco
+            self.space.debug_draw(draw_options)  # Dibuja los objetos de Pymunk
+
+            pygame.display.flip()  # Actualiza la pantalla
+            reloj.tick(60)  # Limita a 60 FPS
+
+        pygame.quit()"""
+    
+    def suavizar_linea(self):
+        if len(self.historial_lineas) == 0:
+            return None, None
+        centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
+        angulo_promedio = np.mean([angulo for _, angulo in self.historial_lineas])
+
+        # Limita el cambio de ángulo para evitar saltos bruscos
+        if self.ultimo_angulo_valido is not None:
+            delta_angulo = min(10, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
+            angulo_promedio = self.ultimo_angulo_valido + np.sign(angulo_promedio - self.ultimo_angulo_valido) * delta_angulo
+
+        self.ultimo_angulo_valido = angulo_promedio
+        return centro_promedio, angulo_promedio
 
     def capture_video(self):
-        video_path = "data/lento.mp4"
+        #video_path = f"http://{self.ip_address}:{self.port}/video"
+        video_path = "data/len2.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -95,134 +251,201 @@ class VideoProcessor:
         results = self.model(frame, verbose=False, conf=self.confidence_threshold, iou=self.iou_threshold)[0]
         detections = sv.Detections.from_ultralytics(results)
         
-        # Actualizar detecciones con ByteTrack para obtener tracker_id
-        detections = self.tracker.update_with_detections(detections)
+        # Preprocesamiento y filtrado de detecciones
+        valid_detections_indices = self.filter_detections(detections)
         
-        # Ejemplo de cómo podrías llamar a calculate_average_ball_radius
-        if self.average_ball_radius is None and len(detections) > 0:
-            self.calculate_average_ball_radius(detections)
-        
-        # Imprimir la estructura de detections para depuración
-        print(f"Tipo de detections: {type(detections)}")
-        print(f"Atributos disponibles en detections: {dir(detections)}")
-        if hasattr(detections, 'xyxy'):
-            print(f"xyxy: {detections.xyxy}")
-        if hasattr(detections, 'tracker_id'):
-            print(f"tracker_id: {detections.tracker_id}")
-        if hasattr(detections, 'class_id'):
-            print(f"class_id: {detections.class_id}")
-        if hasattr(detections, 'confidence'):
-            print(f"confidence: {detections.confidence}")
-        
-        annotated_frame = frame.copy()
-
-        # Actualiza las posiciones de las bolas en la simulación basadas en las detecciones actuales
-        self.update_simulation_balls(detections)
-
-        for i in range(len(detections.xyxy)):
-            bbox = detections.xyxy[i]
-            class_id = detections.class_id[i]
-            tracker_id = detections.tracker_id[i] if detections.tracker_id is not None else None
-            confidence = detections.confidence[i]
-
-            if class_id == 2:  # Si el objeto detectado es el taco
-                # En process_frame, cuando llamas a process_taco, pasa detections también
-                self.process_taco(annotated_frame, bbox, detections)
-            else:
-                # Dibujar todas las detecciones, excepto el taco
-                x1, y1, x2, y2 = map(int, bbox)
-                center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-                radius = int(max(x2 - x1, y2 - y1) / 2)
-
-                # Asegura que class_id sea positivo antes de ajustar por el índice base-0.
-                if class_id > 0:
-                    color_bgr = COLORS.by_idx(class_id - 1).as_bgr()
-                else:
-                    # Para class_id = 0 o cualquier otro caso no esperado, usa un color predeterminado (e.g., rojo)
-                    color_bgr = (0, 0, 255)  # BGR para rojo
-
-                cv2.circle(annotated_frame, center, radius, color_bgr, 2)
-                
-        return annotated_frame
-
-    def update_simulation_balls(self, detections):
-        for i, bbox in enumerate(detections.xyxy):
-            tracker_id = detections.tracker_id[i]
-            position = pymunk.Vec2d((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-
-            if tracker_id not in self.ball_shapes:
-                ball_body = pymunk.Body(1, pymunk.inf, body_type=pymunk.Body.KINEMATIC)
-                ball_body.position = position
-                ball_shape = pymunk.Circle(ball_body, self.average_ball_radius)
-                self.space.add(ball_body, ball_shape)
-                self.ball_shapes[tracker_id] = ball_shape
-            else:
-                self.ball_shapes[tracker_id].body.position = position
-  
-    #Función para mejorar el refinamiento de contornos    
-    def process_taco(self, frame, bbox, detections):
-        x1, y1, x2, y2 = map(int, bbox)
-        taco_subimage = frame[y1:y2, x1:x2]
-
-        # Convertir a escala de grises y aplicar detección de bordes
-        gray = cv2.cvtColor(taco_subimage, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-
-        # Encontrar contornos en la subimagen
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Lista para almacenar las posiciones de las bolas detectadas (actualizar según tu implementación actual)
-        ball_positions = self.get_ball_positions(detections)  # Usa detections directamente
-
-        best_contour = None
-        min_distance_to_ball = float('inf')  # Inicializar con un valor alto
-
-        for contour in contours:
-            # Evaluar la linealidad y orientación del contorno
-            if self.is_contour_linear_and_properly_oriented(contour):
-                # Calcular la distancia del contorno a la bola más cercana
-                contour_center = self.get_contour_center(contour)
-                distance, closest_ball_position = self.get_distance_to_closest_ball(contour_center, ball_positions)
-
-                # Verificar si el contorno está suficientemente cerca de alguna bola
-                if distance < min_distance_to_ball:
-                    min_distance_to_ball = distance
-                    best_contour = contour
-
-        # Actualización para manejar la trayectoria del taco
-        if best_contour is not None:
-            # Asumiendo que best_contour es la punta del taco
-            contour_center = self.get_contour_center(best_contour)
-            if contour_center:
-                self.update_taco_position(contour_center)
-                direction = self.calculate_taco_direction()
-                if direction:
-                    new_ball_positions = self.simulate_taco_interaction(direction)
-                    self.visualize_simulation_result(frame, new_ball_positions)
-                    #self.simulate_taco_interaction(direction)  # Simula la interacción del taco
-                #    print(f"Taco direction: {direction}")  # Solo para depuración
-
-        # Dibujar el rectángulo del taco para visualización
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    def update_taco_position(self, new_position):
-        # Asegúrate de que new_position es una tupla o lista con dos elementos
-        if new_position is not None and len(new_position) == 2:
-            x, y = new_position  # Desempaquetar las coordenadas x e y
-            self.taco_positions.append(pymunk.Vec2d(x, y))  # Pasar x e y como argumentos separados
-            if len(self.taco_positions) > 10:  # Mantener solo las últimas 10 posiciones
-                self.taco_positions.pop(0)
-            #print(f"Updated taco positions: {[str(pos) for pos in self.taco_positions]}")  # Imprime las posiciones actuales del taco
+        # Actualización de detecciones con ByteTrack
+        if valid_detections_indices:
+            valid_detections = self.extract_valid_detections(detections, valid_detections_indices)
         else:
-            print("New position is None or not correctly formatted.")
+            valid_detections = sv.Detections.empty()
 
-    def calculate_taco_direction(self):
-        if len(self.taco_positions) >= 2:
-            # Calcular la dirección como la diferencia entre las dos últimas posiciones
-            direction = self.taco_positions[-1] - self.taco_positions[-2]
-            #print(f"Calculated taco direction: {direction}")  # Imprime la dirección calculada
-            return direction
-        return None
+        detections = self.tracker.update_with_detections(valid_detections)
+
+        # Procesamiento de detecciones de bolas y taco
+        self.handle_detections(frame, detections)
+
+        return self.annotate_frame(frame, detections)
+
+    def filter_detections(self, detections):
+        valid_detections_indices_balls = [i for i, bbox in enumerate(detections.xyxy)
+                                        if self.is_ball_inside_table(bbox) and detections.class_id[i] in [0, 1]]
+        valid_detections_indices_cue = [i for i, class_id in enumerate(detections.class_id) if class_id == 2]
+        return valid_detections_indices_balls + valid_detections_indices_cue
+    
+    def is_ball_inside_table(self, bbox):
+        center_point = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+        return cv2.pointPolygonTest(self.mesa_corners, center_point, False) >= 0
+    
+    def extract_valid_detections(self, detections, valid_detections_indices):
+        return sv.Detections(xyxy=detections.xyxy[valid_detections_indices],
+                            class_id=detections.class_id[valid_detections_indices],
+                            confidence=detections.confidence[valid_detections_indices] if detections.confidence is not None else None,
+                            tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
+    
+    # LA CONDICIONAL ES QUE ESTE MÁS CERCA DEL CENTRO DE UNA BOLA   
+    """def handle_detections(self, frame, detections):
+        centros_bolas = []
+
+        # Primero, recopilar los centros de todas las bolas detectadas
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            if class_id in [0, 1]:  # Bolas
+                centro_bola_x = (bbox[0] + bbox[2]) / 2
+                centro_bola_y = (bbox[1] + bbox[3]) / 2
+                centros_bolas.append((centro_bola_x, centro_bola_y))
+
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    if contornos:
+                        contorno_taco = max(contornos, key=cv2.contourArea)
+                        rect = cv2.minAreaRect(contorno_taco)
+
+                        centro, (ancho, alto), angulo = rect
+                        if ancho < alto:
+                            angulo += 90
+
+                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
+                        if len(self.historial_lineas) > self.max_historial:
+                            self.historial_lineas.pop(0)
+
+                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
+
+                        if centro_suavizado is not None and angulo_suavizado is not None:
+                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                            longitud_linea = max(frame.shape) * 2
+                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
+                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
+                            
+                            # Ahora, determinar cuál extremo de la trayectoria está más cerca a algún centro de bola
+                            distancia_minima = float('inf')
+                            extremo_cercano = None
+                            for centro_bola in centros_bolas:
+                                distancia_inicio = np.linalg.norm(punto_inicio_suavizado - centro_bola)
+                                distancia_final = np.linalg.norm(punto_final_suavizado - centro_bola)
+                                if distancia_inicio < distancia_minima:
+                                    distancia_minima = distancia_inicio
+                                    extremo_cercano = punto_inicio_suavizado
+                                if distancia_final < distancia_minima:
+                                    distancia_minima = distancia_final
+                                    extremo_cercano = punto_final_suavizado
+                            
+                            # Dibuja la parte de la trayectoria del taco más cercana a la bola
+                            if extremo_cercano is not None:
+                                cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
+
+                else:
+                    print("ROI vacío o de tamaño inválido.")
+        return frame"""
+        
+    def handle_detections(self, frame, detections):
+        # No se modifican los centros de las bolas para la lógica de la trayectoria del taco
+        centros_bolas = []
+        current_active_balls = []
+        
+        if self.frames_processed < self.initial_frames_for_average:
+            for i, bbox in enumerate(detections.xyxy):
+                class_id = detections.class_id[i]
+                if class_id in [0, 1]:  # Bolas
+                    radio = ((bbox[2] - bbox[0]) + (bbox[3] - bbox[1])) / 4
+                    self.detected_radii.append(radio)
+
+            self.frames_processed += 1
+
+            if self.frames_processed == self.initial_frames_for_average:
+                if self.detected_radii:
+                    self.average_ball_radius = sum(self.detected_radii) / len(self.detected_radii)
+                    print (self.average_ball_radius)
+                else:
+                    self.average_ball_radius = 18  # Valor fijo si no hay detecciones
+        
+        # Procesamiento de detecciones para bolas y actualización/preparación para Pymunk
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            tracker_id = detections.tracker_id[i]
+
+            if class_id in [0, 1]:  # Bolas
+                centro_bola_x = (bbox[0] + bbox[2]) / 2
+                centro_bola_y = (bbox[1] + bbox[3]) / 2
+                centros_bolas.append((centro_bola_x, centro_bola_y))
+                # Actualizar o añadir la bola en el espacio de Pymunk de forma preparatoria
+                self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y))
+                current_active_balls.append(tracker_id)
+
+        # Llamada a la función para eliminar bolas no detectadas
+        self.remove_undetected_balls(current_active_balls)
+
+        # Actualizar la lista de bolas activas
+        self.active_balls = current_active_balls
+
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    if contornos:
+                        contorno_taco = max(contornos, key=cv2.contourArea)
+                        rect = cv2.minAreaRect(contorno_taco)
+
+                        centro, (ancho, alto), angulo = rect
+                        if ancho < alto:
+                            angulo += 90
+
+                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
+                        if len(self.historial_lineas) > self.max_historial:
+                            self.historial_lineas.pop(0)
+
+                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
+
+                        if centro_suavizado is not None and angulo_suavizado is not None:
+                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                            longitud_linea = max(frame.shape) * 2
+                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
+                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
+                            
+                            # Ahora, determinar cuál extremo de la trayectoria está más cerca a algún centro de bola
+                            distancia_minima = float('inf')
+                            extremo_cercano = None
+                            for centro_bola in centros_bolas:
+                                distancia_inicio = np.linalg.norm(punto_inicio_suavizado - centro_bola)
+                                distancia_final = np.linalg.norm(punto_final_suavizado - centro_bola)
+                                if distancia_inicio < distancia_minima:
+                                    distancia_minima = distancia_inicio
+                                    extremo_cercano = punto_inicio_suavizado
+                                if distancia_final < distancia_minima:
+                                    distancia_minima = distancia_final
+                                    extremo_cercano = punto_final_suavizado
+                            
+                            # Dibuja la parte de la trayectoria del taco más cercana a la bola
+                            if extremo_cercano is not None:
+                                cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
+
+                else:
+                    print("ROI vacío o de tamaño inválido.")
+        return frame
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
         annotated_frame = frame.copy()
@@ -248,119 +471,10 @@ class VideoProcessor:
                 cv2.circle(annotated_frame, center, radius, (255, 0, 0), 2)  # Azul
                 label = f"Bola #{tracker_id}"
                 cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            # Taco de billar: dibujar un rectángulo verde
-            elif class_id == 2:
-                cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)  # Verde
-                label = f"Taco #{tracker_id}"
-                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         return annotated_frame
-
-    def is_contour_linear_and_properly_oriented(self, contour, linearity_threshold=5, angle_threshold=30):
-        # Ajustar los puntos del contorno para cv2.fitLine
-        rows, cols = contour.shape[:2]
-        [vx, vy, x, y] = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01)
-
-        # Calcular la distancia promedio de los puntos del contorno a la línea ajustada
-        distances = []
-        for point in contour:
-            point_x, point_y = point[0][0], point[0][1]
-            line_y_at_x = (vy / vx) * (point_x - x) + y
-            distance = np.abs(point_y - line_y_at_x)
-            distances.append(distance)
-        average_distance = np.mean(distances)
-
-        # Evaluar la linealidad basada en la distancia promedio
-        is_linear = average_distance <= linearity_threshold
-
-        # Calcular la orientación de la línea y evaluar si está adecuadamente orientada
-        angle = np.arctan2(vy, vx) * (180 / np.pi)
-        is_properly_oriented = (-angle_threshold <= angle <= angle_threshold) or (180 - angle_threshold <= angle <= 180 + angle_threshold)
-
-        return is_linear and is_properly_oriented
     
-    def get_ball_positions(self, detections):
-        ball_positions = []
-        for i in range(len(detections.xyxy)):
-            class_id = detections.class_id[i]
-            if class_id in [0, 1]:  # Asumiendo que 0 y 1 son las clases de las bolas
-                bbox = detections.xyxy[i]
-                x_center = int((bbox[0] + bbox[2]) / 2)
-                y_center = int((bbox[1] + bbox[3]) / 2)
-                ball_positions.append((x_center, y_center))
-        return ball_positions
-
-    def get_contour_center(self, contour):
-        M = cv2.moments(contour)
-        if M["m00"] == 0:
-            return None
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        return (cx, cy)
-    
-    def get_distance_to_closest_ball(self, contour_center, ball_positions):
-        if contour_center is None:
-            return float('inf'), None  # Retornar un valor alto para la distancia y None para la posición
-
-        min_distance = float('inf')
-        closest_ball_position = None
-        for ball_position in ball_positions:
-            distance = np.sqrt((contour_center[0] - ball_position[0]) ** 2 + (contour_center[1] - ball_position[1]) ** 2)
-            if distance < min_distance:
-                min_distance = distance
-                closest_ball_position = ball_position
-        return min_distance, closest_ball_position
-    
-    def calculate_average_ball_radius(self, detections):
-        if not detections.xyxy.size:  # Verifica si la lista de detecciones está vacía
-            print("No ball detections available. Using default average radius.")
-            self.average_ball_radius = 15  # Establece el radio promedio a un valor predeterminado
-            return  # Sale de la función
-
-        # Continúa con el cálculo si hay detecciones
-        radii = []
-        for bbox in detections.xyxy:
-            x1, y1, x2, y2 = bbox
-            radius = ((x2 - x1) + (y2 - y1)) / 4  # Calcula el radio para cada detección
-            radii.append(radius)
-        
-        if radii:  # Asegura que la lista de radios no esté vacía
-            self.average_ball_radius = np.mean(radii)
-            print(f"Average ball radius updated: {self.average_ball_radius}")
-        else:
-            print("No valid ball detections. Using default average radius.")
-            self.average_ball_radius = 15  # Establece el radio promedio a un valor predeterminado si no hay detecciones válidas
-    
-    def simulate_taco_interaction(self, direction):
-        # Asumiendo que direction es un vector pymunk.Vec2d con la dirección del taco
-        taco_body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-        taco_body.position = self.taco_positions[-1]
-        taco_shape = pymunk.Segment(taco_body, pymunk.Vec2d(0, 0), direction, self.average_ball_radius)
-        self.space.add(taco_body, taco_shape)
-
-        # Simular múltiples pasos en el espacio para ver cómo evolucionan las interacciones
-        for _ in range(10):  # Simula 10 pasos, ajusta según sea necesario
-            self.space.step(1/60.0)
-
-        # Recopilar las nuevas posiciones de las bolas
-        new_ball_positions = [ball_body.position for ball_body in self.ball_bodies]
-
-        # Quitar el cuerpo del taco después de la simulación
-        self.space.remove(taco_body, taco_shape)
-
-        # Devolver las nuevas posiciones para su visualización
-        return new_ball_positions
-
-    def visualize_simulation_result(self, frame, new_ball_positions):
-        for position in new_ball_positions:
-            # Convertir posición pymunk a coordenadas de OpenCV
-            x, y = int(position.x), int(position.y)
-            # Dibujar un círculo en la nueva posición de la bola
-            cv2.circle(frame, (x, y), self.average_ball_radius, (0, 255, 255), 2)  # Color amarillo para la visualización
-    
-    
-    def start(self):
+    """def start(self):
         def signal_handler(sig, frame):
             print('Deteniendo los hilos...')
             self.shutdown_event.set()
@@ -376,6 +490,73 @@ class VideoProcessor:
         capture_thread.join()
         processing_thread.join()
 
+        cv2.destroyAllWindows()"""
+        
+    def start(self):
+        # Inicializar Pygame y configurar la ventana
+        pygame.init()
+        pantalla = pygame.display.set_mode((1920, 1080))
+        reloj = pygame.time.Clock()
+        corriendo = True
+        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
+
+        font = pygame.font.Font(None, 36)  # Fuente para el texto de rendimiento
+
+        # Variables para calcular FPS y latencia
+        frame_count = 0
+        start_time = pygame.time.get_ticks()
+        fps = 0  # Inicializa FPS
+        latency = 0  # Inicializa la latencia
+
+        # Iniciar los hilos de captura y procesamiento de video
+        capture_thread = threading.Thread(target=self.capture_video)
+        processing_thread = threading.Thread(target=self.process_video)
+        capture_thread.start()
+        processing_thread.start()
+
+        while corriendo:
+            for evento in pygame.event.get():
+                if evento.type == QUIT:
+                    corriendo = False
+                    self.shutdown_event.set()
+
+            frame_start_time = time.time()  # Inicio de procesamiento del frame actual
+            
+            pantalla.fill((255, 255, 255))  # Fondo blanco
+
+            # Programar el post-step callback para procesar actualizaciones de bolas
+            # Hacerlo aquí asegura que se procesen después del próximo paso de simulación
+            self.space.add_post_step_callback(self.process_ball_updates, None)
+
+            # Avanzar la simulación de Pymunk
+            self.space.step(1/48.0)
+
+            # Visualizar la simulación de Pymunk
+            self.space.debug_draw(draw_options)
+
+            # Cálculo de FPS y latencia (solo se actualiza cada segundo)
+            current_time = pygame.time.get_ticks()
+            if current_time - start_time > 1000:
+                fps = frame_count / ((current_time - start_time) / 1000.0)
+                latency = (time.time() - frame_start_time) * 1000  # Latencia en milisegundos
+                start_time = current_time
+                frame_count = 0
+
+            # Mostrar FPS y latencia constantemente
+            fps_text = font.render(f"FPS: {fps:.2f}", True, (0, 255, 0))
+            latency_text = font.render(f"Latency: {latency:.2f} ms", True, (0, 255, 0))
+            pantalla.blit(fps_text, (50, 50))
+            pantalla.blit(latency_text, (50, 90))
+
+            frame_count += 1
+
+            pygame.display.flip()  # Actualizar la pantalla
+            reloj.tick(60)  # 60 FPS
+
+        # Esperar a que los hilos de captura y procesamiento finalicen
+        capture_thread.join()
+        processing_thread.join()
+        pygame.quit()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
@@ -393,55 +574,39 @@ if __name__ == "__main__":
                                port=args.port,
                                confidence_threshold=args.confidence_threshold,
                                iou_threshold=args.iou_threshold)
-
+    #processor.visualizar_bordes_mesa()
     processor.start()
     
     
+    current_active_balls = []
     
+    # Procesamiento inicial para calcular el radio promedio de las bolas
+    if self.frames_processed < self.initial_frames_for_average:
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            if class_id in [0, 1]:  # Bolas
+                radio = ((bbox[2] - bbox[0]) + (bbox[3] - bbox[1])) / 4
+                self.detected_radii.append(radio)
+
+        self.frames_processed += 1
+
+        if self.frames_processed == self.initial_frames_for_average:
+            if self.detected_radii:
+                self.average_ball_radius = sum(self.detected_radii) / len(self.detected_radii)
+            else:
+                self.average_ball_radius = 18  # Valor fijo si no hay detecciones
     
+    # Procesamiento de detecciones para bolas
+    for i, bbox in enumerate(detections.xyxy):
+        class_id = detections.class_id[i]
+        tracker_id = detections.tracker_id[i]
+
+        if class_id in [0, 1]:  # Bolas
+            centro_bola_x = (bbox[0] + bbox[2]) / 2
+            centro_bola_y = (bbox[1] + bbox[3]) / 2
+            # Prepara la actualización de la bola en el espacio de Pymunk
+            self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y), self.average_ball_radius)
+            current_active_balls.append(tracker_id)
     
-    
-    
-    #Función para mejorar el refinamiento de contornos    
-    def process_taco(self, frame, bbox, detections):
-        x1, y1, x2, y2 = map(int, bbox)
-        taco_subimage = frame[y1:y2, x1:x2]
-
-        # Convertir a escala de grises y aplicar detección de bordes
-        gray = cv2.cvtColor(taco_subimage, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-
-        # Encontrar contornos en la subimagen
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Lista para almacenar las posiciones de las bolas detectadas (actualizar según tu implementación actual)
-        ball_positions = self.get_ball_positions(detections)  # Usa detections directamente
-
-        best_contour = None
-        min_distance_to_ball = float('inf')  # Inicializar con un valor alto
-
-        for contour in contours:
-            # Evaluar la linealidad y orientación del contorno
-            if self.is_contour_linear_and_properly_oriented(contour):
-                # Calcular la distancia del contorno a la bola más cercana
-                contour_center = self.get_contour_center(contour)
-                distance, closest_ball_position = self.get_distance_to_closest_ball(contour_center, ball_positions)
-
-                # Verificar si el contorno está suficientemente cerca de alguna bola
-                if distance < min_distance_to_ball:
-                    min_distance_to_ball = distance
-                    best_contour = contour
-
-        # Actualización para manejar la trayectoria del taco
-        if best_contour is not None:
-            # Asumiendo que best_contour es la punta del taco
-            contour_center = self.get_contour_center(best_contour)
-            if contour_center:
-                self.update_taco_position(contour_center)
-                direction = self.calculate_taco_direction()
-                if direction:
-                    new_ball_positions = self.simulate_taco_interaction(direction)
-                    self.visualize_simulation_result(frame, new_ball_positions)
-
-        # Dibujar el rectángulo del taco para visualización
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    # Guarda la lista de IDs de bolas activas para usar en el callback post-step
+    self.current_active_balls = current_active_balls

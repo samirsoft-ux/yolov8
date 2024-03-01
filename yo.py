@@ -8,12 +8,12 @@ import subprocess
 from ultralytics import YOLO
 import threading
 import queue
-import signal  # Importar el módulo signal
 import json
 import pymunk
 import pygame
 import pymunk.pygame_util
-from pymunk.vec2d import Vec2d
+from pygame.locals import QUIT
+import time
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -51,6 +51,61 @@ class VideoProcessor:
         self.max_historial = 3  # Número máximo de elementos en el historial
         self.ultimo_angulo_valido = None # En tu inicialización de clase, agrega un valor para rastrear el último ángulo válido
     
+        #Inicializaciones para simulación 2D
+        self.ball_updates = {}  # Para almacenar las actualizaciones de las bolas antes de aplicarlas
+        self.balls = {}  # Para almacenar las bolas presentes en el espacio de simulación
+        self.active_balls = []  # Lista para mantener los IDs de las bolas activas (detectadas)
+        #Calculo Radio 
+        self.initial_frames_for_average = 10  # Número de frames para calcular el promedio
+        self.detected_radii = []  # Para acumular los radios detectados
+        self.frames_processed = 0  # Contador de frames procesados
+        #Problemas de seguridad
+        self.balls_to_remove = set()
+    def add_ball_to_space(self, position, radius=10, mass=1):
+        """
+        Añade una bola al espacio de Pymunk y devuelve su objeto Circle.
+        """
+        moment = pymunk.moment_for_circle(mass, 0, radius, (0, 0))
+        body = pymunk.Body(mass, moment)
+        body.position = position
+        shape = pymunk.Circle(body, radius)
+        shape.elasticity = 0.95  # Coeficiente de elasticidad de la bola
+        self.space.add(body, shape)
+        return shape
+    
+    def prepare_ball_update(self, tracker_id, position, radius=None):
+        if radius is None:
+            # Usa el radio promedio si está disponible, de lo contrario usa un valor fijo
+            radius = getattr(self, 'average_ball_radius', 18)
+        self.ball_updates[tracker_id] = (position, radius)
+    
+    def process_ball_updates(self, space, data):
+        # Añadir o actualizar bolas
+        for tracker_id, (position, radius) in self.ball_updates.items():
+            if tracker_id in self.balls:
+                # Actualiza la posición de la bola existente
+                self.balls[tracker_id].body.position = position
+            else:
+                # Añade una nueva bola al espacio
+                self.balls[tracker_id] = self.add_ball_to_space(position, radius, tracker_id)  # Asegúrate de que esta función no modifique directamente el espacio
+        self.ball_updates.clear()
+
+        # Eliminar bolas no detectadas
+        current_active_balls = self.getCurrentActiveBalls()  # Asumiendo que esta función devuelve los tracker_id de las bolas actualmente activas
+        balls_to_remove = [ball_id for ball_id in self.balls if ball_id not in current_active_balls]
+        for ball_id in balls_to_remove:
+            ball_shape = self.balls[ball_id]
+            space.remove(ball_shape.body, ball_shape)  # Elimina la bola del espacio
+            del self.balls[ball_id]
+    
+    def getCurrentActiveBalls(self):
+        # Retorna la lista actual de tracker_id de bolas activas
+        return self.active_balls
+            
+    def remove_undetected_balls(self, current_active_balls):
+        balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
+        self.balls_to_remove.update(balls_to_remove)
+    
     # Función para reordenar las esquinas
     def reordenar_esquinas(self, corners):
         # Asumimos que corners es una lista de puntos (x, y) que representan las esquinas de la mesa
@@ -86,28 +141,6 @@ class VideoProcessor:
             space.add(shape)
 
         return space
-    
-    """def visualizar_bordes_mesa(self, dimensiones_pantalla=(1920, 1080)):
-        print(self.mesa_corners)
-        pygame.init()
-        pantalla = pygame.display.set_mode(dimensiones_pantalla)
-        reloj = pygame.time.Clock()
-        corriendo = True
-
-        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
-
-        while corriendo:
-            for evento in pygame.event.get():
-                if evento.type == pygame.QUIT:
-                    corriendo = False
-
-            pantalla.fill((255, 255, 255))  # Fondo blanco
-            self.space.debug_draw(draw_options)  # Dibuja los objetos de Pymunk
-
-            pygame.display.flip()  # Actualiza la pantalla
-            reloj.tick(60)  # Limita a 60 FPS
-
-        pygame.quit()"""
     
     def suavizar_linea(self):
         if len(self.historial_lineas) == 0:
@@ -198,18 +231,43 @@ class VideoProcessor:
                             class_id=detections.class_id[valid_detections_indices],
                             confidence=detections.confidence[valid_detections_indices] if detections.confidence is not None else None,
                             tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
-    
-    # LA CONDICIONAL ES QUE ESTE MÁS CERCA DEL CENTRO DE UNA BOLA   
+        
     def handle_detections(self, frame, detections):
+        # No se modifican los centros de las bolas para la lógica de la trayectoria del taco
         centros_bolas = []
+        current_active_balls = []
+        
+        if self.frames_processed < self.initial_frames_for_average:
+            for i, bbox in enumerate(detections.xyxy):
+                class_id = detections.class_id[i]
+                if class_id in [0, 1]:  # Bolas
+                    radio = ((bbox[2] - bbox[0]) + (bbox[3] - bbox[1])) / 4
+                    self.detected_radii.append(radio)
 
-        # Primero, recopilar los centros de todas las bolas detectadas
+            self.frames_processed += 1
+
+            if self.frames_processed == self.initial_frames_for_average:
+                if self.detected_radii:
+                    self.average_ball_radius = sum(self.detected_radii) / len(self.detected_radii)
+                    print (self.average_ball_radius)
+                else:
+                    self.average_ball_radius = 18  # Valor fijo si no hay detecciones
+        
+        # Procesamiento de detecciones para bolas y actualización/preparación para Pymunk
         for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
+            tracker_id = detections.tracker_id[i]
+
             if class_id in [0, 1]:  # Bolas
                 centro_bola_x = (bbox[0] + bbox[2]) / 2
                 centro_bola_y = (bbox[1] + bbox[3]) / 2
                 centros_bolas.append((centro_bola_x, centro_bola_y))
+                # Actualizar o añadir la bola en el espacio de Pymunk de forma preparatoria
+                self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y))
+                current_active_balls.append(tracker_id)
+
+        # Actualizar la lista de bolas activas
+        self.active_balls = current_active_balls
 
         for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
@@ -293,23 +351,72 @@ class VideoProcessor:
                 cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         return annotated_frame
-    
+        
     def start(self):
-        def signal_handler(sig, frame):
-            print('Deteniendo los hilos...')
-            self.shutdown_event.set()
+        # Inicializar Pygame y configurar la ventana
+        pygame.init()
+        pantalla = pygame.display.set_mode((1920, 1080))
+        reloj = pygame.time.Clock()
+        corriendo = True
+        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
 
-        signal.signal(signal.SIGINT, signal_handler)
+        font = pygame.font.Font(None, 36)  # Fuente para el texto de rendimiento
 
+        # Variables para calcular FPS y latencia
+        frame_count = 0
+        start_time = pygame.time.get_ticks()
+        fps = 0  # Inicializa FPS
+        latency = 0  # Inicializa la latencia
+
+        # Iniciar los hilos de captura y procesamiento de video
         capture_thread = threading.Thread(target=self.capture_video)
         processing_thread = threading.Thread(target=self.process_video)
-
         capture_thread.start()
         processing_thread.start()
 
+        while corriendo:
+            for evento in pygame.event.get():
+                if evento.type == QUIT:
+                    corriendo = False
+                    self.shutdown_event.set()
+
+            frame_start_time = time.time()  # Inicio de procesamiento del frame actual
+            
+            pantalla.fill((255, 255, 255))  # Fondo blanco
+
+            # Programar el post-step callback para procesar actualizaciones de bolas
+            # Hacerlo aquí asegura que se procesen después del próximo paso de simulación
+            self.space.add_post_step_callback(self.process_ball_updates, None)
+
+            # Avanzar la simulación de Pymunk
+            self.space.step(1/48.0)
+
+            # Visualizar la simulación de Pymunk
+            self.space.debug_draw(draw_options)
+
+            # Cálculo de FPS y latencia (solo se actualiza cada segundo)
+            current_time = pygame.time.get_ticks()
+            if current_time - start_time > 1000:
+                fps = frame_count / ((current_time - start_time) / 1000.0)
+                latency = (time.time() - frame_start_time) * 1000  # Latencia en milisegundos
+                start_time = current_time
+                frame_count = 0
+
+            # Mostrar FPS y latencia constantemente
+            fps_text = font.render(f"FPS: {fps:.2f}", True, (0, 255, 0))
+            latency_text = font.render(f"Latency: {latency:.2f} ms", True, (0, 255, 0))
+            pantalla.blit(fps_text, (50, 50))
+            pantalla.blit(latency_text, (50, 90))
+
+            frame_count += 1
+
+            pygame.display.flip()  # Actualizar la pantalla
+            reloj.tick(60)  # 60 FPS
+
+        # Esperar a que los hilos de captura y procesamiento finalicen
         capture_thread.join()
         processing_thread.join()
-
+        pygame.quit()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
@@ -327,5 +434,4 @@ if __name__ == "__main__":
                                port=args.port,
                                confidence_threshold=args.confidence_threshold,
                                iou_threshold=args.iou_threshold)
-    #processor.visualizar_bordes_mesa()
     processor.start()
