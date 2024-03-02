@@ -8,7 +8,6 @@ import subprocess
 from ultralytics import YOLO
 import threading
 import queue
-import signal  # Importar el módulo signal
 import json
 import pymunk
 import pygame
@@ -62,6 +61,8 @@ class VideoProcessor:
         self.frames_processed = 0  # Contador de frames procesados
         #Problemas de seguridad
         self.balls_to_remove = set()
+    
+    #BOLAS----------------------------------------------
     def add_ball_to_space(self, position, radius=10, mass=1):
         """
         Añade una bola al espacio de Pymunk y devuelve su objeto Circle.
@@ -71,25 +72,19 @@ class VideoProcessor:
         body.position = position
         shape = pymunk.Circle(body, radius)
         shape.elasticity = 0.95  # Coeficiente de elasticidad de la bola
+        shape.friction = 0.9  # fricción de la bola
         self.space.add(body, shape)
         return shape
     
+    #MEJORAR para las bolas
+    #Considera la interacción entre la bola y la mesa (por ejemplo, efectos de rotación o "spin") al definir las propiedades físicas, lo que puede requerir ajustes adicionales en las propiedades de las bolas y la mesa.
+    #Fricción (shape.friction): Un coeficiente de fricción de 0.9 para la bola podría ser ligeramente alto para una mesa de billar, que generalmente permite que las bolas deslicen suavemente. Las mesas de billar están diseñadas para minimizar la fricción, por lo que un valor más bajo podría ser más realista, alrededor de 0.2 a 0.4, dependiendo del material de la superficie y de cómo quieras que se comporte la bola después del impacto y durante el movimiento.
+
     def prepare_ball_update(self, tracker_id, position, radius=None):
         if radius is None:
             # Usa el radio promedio si está disponible, de lo contrario usa un valor fijo
             radius = getattr(self, 'average_ball_radius', 18)
         self.ball_updates[tracker_id] = (position, radius)
-    
-    """def process_ball_updates(self, space, data):
-        
-        #Post-step callback para actualizar o añadir bolas al espacio de Pymunk.
-        
-        for tracker_id, (position, radius) in self.ball_updates.items():
-            if tracker_id in self.balls:
-                self.balls[tracker_id].body.position = position
-            else:
-                self.balls[tracker_id] = self.add_ball_to_space(position, radius)
-        self.ball_updates.clear()"""
     
     def process_ball_updates(self, space, data):
         # Añadir o actualizar bolas
@@ -113,27 +108,35 @@ class VideoProcessor:
     def getCurrentActiveBalls(self):
         # Retorna la lista actual de tracker_id de bolas activas
         return self.active_balls
-    
-    """def remove_undetected_balls(self, current_active_balls):
-        balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
-
-        for ball_id in balls_to_remove:
-            ball_shape = self.balls[ball_id]
-            self.space.remove(ball_shape.body, ball_shape)  # Elimina la bola del espacio
-            del self.balls[ball_id]  # Elimina la referencia de la bola"""
             
     def remove_undetected_balls(self, current_active_balls):
         balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
         self.balls_to_remove.update(balls_to_remove)
+    #BOLAS----------------------------------------------
     
-    """def update_or_add_ball(self, tracker_id, position, radius=10):
-        
-        #Actualiza la posición de una bola existente o la añade si no existe.
-        
-        if tracker_id in self.balls:
-            self.balls[tracker_id].body.position = position
-        else:
-            self.balls[tracker_id] = self.add_ball_to_space(position, radius)"""
+    #TACO------------------------------------------------------
+    
+    def prepare_cue_for_addition(self, start_point, end_point, thickness=5):
+        """
+        Prepara los datos necesarios para añadir el taco al espacio de Pymunk usando un callback.
+        """
+        # Almacena los datos del taco para usarlos en el callback
+        self.cue_data = (start_point, end_point, thickness)
+    
+    def cue_callback(space, data):
+        start_point, end_point, thickness = data
+        # Verifica si ya existe un objeto para el taco y lo elimina
+        if hasattr(space.user_data, 'cue_shape'):
+            space.remove(space.user_data.cue_shape.body, space.user_data.cue_shape)
+
+        body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+        shape = pymunk.Segment(body, start_point, end_point, thickness)
+        shape.elasticity = 1.0
+        shape.friction = 0.5
+        space.add(body, shape)
+        space.user_data.cue_shape = shape
+    
+    #TACO------------------------------------------------------
     
     # Función para reordenar las esquinas
     def reordenar_esquinas(self, corners):
@@ -170,28 +173,6 @@ class VideoProcessor:
             space.add(shape)
 
         return space
-    
-    """def visualizar_bordes_mesa(self, dimensiones_pantalla=(1920, 1080)):
-        print(self.mesa_corners)
-        pygame.init()
-        pantalla = pygame.display.set_mode(dimensiones_pantalla)
-        reloj = pygame.time.Clock()
-        corriendo = True
-
-        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
-
-        while corriendo:
-            for evento in pygame.event.get():
-                if evento.type == pygame.QUIT:
-                    corriendo = False
-
-            pantalla.fill((255, 255, 255))  # Fondo blanco
-            self.space.debug_draw(draw_options)  # Dibuja los objetos de Pymunk
-
-            pygame.display.flip()  # Actualiza la pantalla
-            reloj.tick(60)  # Limita a 60 FPS
-
-        pygame.quit()"""
     
     def suavizar_linea(self):
         if len(self.historial_lineas) == 0:
@@ -282,74 +263,6 @@ class VideoProcessor:
                             class_id=detections.class_id[valid_detections_indices],
                             confidence=detections.confidence[valid_detections_indices] if detections.confidence is not None else None,
                             tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
-    
-    # LA CONDICIONAL ES QUE ESTE MÁS CERCA DEL CENTRO DE UNA BOLA   
-    """def handle_detections(self, frame, detections):
-        centros_bolas = []
-
-        # Primero, recopilar los centros de todas las bolas detectadas
-        for i, bbox in enumerate(detections.xyxy):
-            class_id = detections.class_id[i]
-            if class_id in [0, 1]:  # Bolas
-                centro_bola_x = (bbox[0] + bbox[2]) / 2
-                centro_bola_y = (bbox[1] + bbox[3]) / 2
-                centros_bolas.append((centro_bola_x, centro_bola_y))
-
-        for i, bbox in enumerate(detections.xyxy):
-            class_id = detections.class_id[i]
-
-            if class_id == 2:  # Taco
-                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-
-                if x2 > x1 and y2 > y1:
-                    roi = frame[y1:y2, x1:x2]
-                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
-                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                    if contornos:
-                        contorno_taco = max(contornos, key=cv2.contourArea)
-                        rect = cv2.minAreaRect(contorno_taco)
-
-                        centro, (ancho, alto), angulo = rect
-                        if ancho < alto:
-                            angulo += 90
-
-                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
-                        if len(self.historial_lineas) > self.max_historial:
-                            self.historial_lineas.pop(0)
-
-                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
-
-                        if centro_suavizado is not None and angulo_suavizado is not None:
-                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
-                            longitud_linea = max(frame.shape) * 2
-                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
-                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
-                            
-                            # Ahora, determinar cuál extremo de la trayectoria está más cerca a algún centro de bola
-                            distancia_minima = float('inf')
-                            extremo_cercano = None
-                            for centro_bola in centros_bolas:
-                                distancia_inicio = np.linalg.norm(punto_inicio_suavizado - centro_bola)
-                                distancia_final = np.linalg.norm(punto_final_suavizado - centro_bola)
-                                if distancia_inicio < distancia_minima:
-                                    distancia_minima = distancia_inicio
-                                    extremo_cercano = punto_inicio_suavizado
-                                if distancia_final < distancia_minima:
-                                    distancia_minima = distancia_final
-                                    extremo_cercano = punto_final_suavizado
-                            
-                            # Dibuja la parte de la trayectoria del taco más cercana a la bola
-                            if extremo_cercano is not None:
-                                cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
-
-                else:
-                    print("ROI vacío o de tamaño inválido.")
-        return frame"""
         
     def handle_detections(self, frame, detections):
         # No se modifican los centros de las bolas para la lógica de la trayectoria del taco
@@ -384,9 +297,6 @@ class VideoProcessor:
                 # Actualizar o añadir la bola en el espacio de Pymunk de forma preparatoria
                 self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y))
                 current_active_balls.append(tracker_id)
-
-        # Llamada a la función para eliminar bolas no detectadas
-        self.remove_undetected_balls(current_active_balls)
 
         # Actualizar la lista de bolas activas
         self.active_balls = current_active_balls
@@ -442,6 +352,8 @@ class VideoProcessor:
                             # Dibuja la parte de la trayectoria del taco más cercana a la bola
                             if extremo_cercano is not None:
                                 cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
+                                # Preparar los datos para el callback
+                                self.cue_data = (tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), 5)  # El último número es el thickness
 
                 else:
                     print("ROI vacío o de tamaño inválido.")
@@ -473,24 +385,6 @@ class VideoProcessor:
                 cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         return annotated_frame
-    
-    """def start(self):
-        def signal_handler(sig, frame):
-            print('Deteniendo los hilos...')
-            self.shutdown_event.set()
-
-        signal.signal(signal.SIGINT, signal_handler)
-
-        capture_thread = threading.Thread(target=self.capture_video)
-        processing_thread = threading.Thread(target=self.process_video)
-
-        capture_thread.start()
-        processing_thread.start()
-
-        capture_thread.join()
-        processing_thread.join()
-
-        cv2.destroyAllWindows()"""
         
     def start(self):
         # Inicializar Pygame y configurar la ventana
@@ -508,6 +402,9 @@ class VideoProcessor:
         fps = 0  # Inicializa FPS
         latency = 0  # Inicializa la latencia
 
+        # Configuración de colores y visualización
+        color_fondo = (0, 0, 0)  # Fondo negro para proyección
+
         # Iniciar los hilos de captura y procesamiento de video
         capture_thread = threading.Thread(target=self.capture_video)
         processing_thread = threading.Thread(target=self.process_video)
@@ -522,7 +419,7 @@ class VideoProcessor:
 
             frame_start_time = time.time()  # Inicio de procesamiento del frame actual
             
-            pantalla.fill((255, 255, 255))  # Fondo blanco
+            pantalla.fill(color_fondo)  # Fondo blanco
 
             # Programar el post-step callback para procesar actualizaciones de bolas
             # Hacerlo aquí asegura que se procesen después del próximo paso de simulación
@@ -574,39 +471,4 @@ if __name__ == "__main__":
                                port=args.port,
                                confidence_threshold=args.confidence_threshold,
                                iou_threshold=args.iou_threshold)
-    #processor.visualizar_bordes_mesa()
     processor.start()
-    
-    
-    current_active_balls = []
-    
-    # Procesamiento inicial para calcular el radio promedio de las bolas
-    if self.frames_processed < self.initial_frames_for_average:
-        for i, bbox in enumerate(detections.xyxy):
-            class_id = detections.class_id[i]
-            if class_id in [0, 1]:  # Bolas
-                radio = ((bbox[2] - bbox[0]) + (bbox[3] - bbox[1])) / 4
-                self.detected_radii.append(radio)
-
-        self.frames_processed += 1
-
-        if self.frames_processed == self.initial_frames_for_average:
-            if self.detected_radii:
-                self.average_ball_radius = sum(self.detected_radii) / len(self.detected_radii)
-            else:
-                self.average_ball_radius = 18  # Valor fijo si no hay detecciones
-    
-    # Procesamiento de detecciones para bolas
-    for i, bbox in enumerate(detections.xyxy):
-        class_id = detections.class_id[i]
-        tracker_id = detections.tracker_id[i]
-
-        if class_id in [0, 1]:  # Bolas
-            centro_bola_x = (bbox[0] + bbox[2]) / 2
-            centro_bola_y = (bbox[1] + bbox[3]) / 2
-            # Prepara la actualización de la bola en el espacio de Pymunk
-            self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y), self.average_ball_radius)
-            current_active_balls.append(tracker_id)
-    
-    # Guarda la lista de IDs de bolas activas para usar en el callback post-step
-    self.current_active_balls = current_active_balls
