@@ -29,6 +29,8 @@ COLORS = sv.ColorPalette.default()
 # Configura la GPU deseada
 torch.cuda.set_device(0)
 
+IMPACT_FORCE = 1000  # Puedes ajustar este valor según la necesidad
+
 class VideoProcessor:
     def __init__(self, source_weights_path: str, ip_address: str, port: int, confidence_threshold: float = 0.3, iou_threshold: float = 0.7):
         self.ip_address = ip_address
@@ -61,6 +63,12 @@ class VideoProcessor:
         self.frames_processed = 0  # Contador de frames procesados
         #Problemas de seguridad
         self.balls_to_remove = set()
+        
+        self.cue_removal_needed = False
+    
+        #--------------
+        self.extremo_cercano = None
+        self.direccion_suavizada = None
     
     #BOLAS----------------------------------------------
     def add_ball_to_space(self, position, radius=10, mass=1):
@@ -123,20 +131,51 @@ class VideoProcessor:
         # Almacena los datos del taco para usarlos en el callback
         self.cue_data = (start_point, end_point, thickness)
     
-    def cue_callback(space, data):
-        start_point, end_point, thickness = data
-        # Verifica si ya existe un objeto para el taco y lo elimina
-        if hasattr(space.user_data, 'cue_shape'):
-            space.remove(space.user_data.cue_shape.body, space.user_data.cue_shape)
+    def cue_callback(self, space, data):
+        if hasattr(self, 'cue_data'):
+            start_point, end_point, thickness = self.cue_data
+            if hasattr(self, 'cue_shape'):
+                self.space.remove(self.cue_shape.body, self.cue_shape)
+            
+            body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
+            shape = pymunk.Segment(body, start_point, end_point, thickness)
+            shape.elasticity = 1.0
+            shape.friction = 0.5
+            self.space.add(body, shape)
+            self.cue_shape = shape
+    
+    def prepare_cue_for_removal(self):
+        if hasattr(self, 'cue_shape'):
+            self.cue_removal_needed = True
+            
+    def remove_cue_callback(self, space, data):
+        if hasattr(self, 'cue_shape'):
+            space.remove(self.cue_shape.body, self.cue_shape)
+            del self.cue_shape
 
-        body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-        shape = pymunk.Segment(body, start_point, end_point, thickness)
-        shape.elasticity = 1.0
-        shape.friction = 0.5
-        space.add(body, shape)
-        space.user_data.cue_shape = shape
     
     #TACO------------------------------------------------------
+    
+    #Impactos------------------------------------------------------
+    
+    def apply_impact_force(self):
+        # Verifica si el taco fue detectado y si hay datos válidos para aplicar fuerza
+        if not hasattr(self, 'cue_shape') or not hasattr(self, 'extremo_cercano') or not hasattr(self, 'direccion_suavizada'):
+            return
+
+        # Convierte la dirección suavizada de numpy array a un Vector de Pymunk
+        direccion_impacto = pymunk.Vec2d(self.direccion_suavizada[0], self.direccion_suavizada[1])
+
+        for ball_id, ball_shape in self.balls.items():
+            ball_body = ball_shape.body
+            # Calcula la distancia desde el extremo cercano del taco hasta la bola
+            distancia = pymunk.Vec2d(ball_body.position - pymunk.Vec2d(self.extremo_cercano)).length
+            # Suponiendo un umbral de distancia para el impacto
+            if distancia < 50:  # Este valor puede ajustarse según la escala de tu simulación
+                ball_body.apply_impulse_at_local_point(direccion_impacto * IMPACT_FORCE)
+
+    
+    #Impactos------------------------------------------------------
     
     # Función para reordenar las esquinas
     def reordenar_esquinas(self, corners):
@@ -268,6 +307,7 @@ class VideoProcessor:
         # No se modifican los centros de las bolas para la lógica de la trayectoria del taco
         centros_bolas = []
         current_active_balls = []
+        taco_detected = False
         
         if self.frames_processed < self.initial_frames_for_average:
             for i, bbox in enumerate(detections.xyxy):
@@ -335,6 +375,7 @@ class VideoProcessor:
                             longitud_linea = max(frame.shape) * 2
                             punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
                             punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
+                            self.direccion_suavizada = direccion_suavizada
                             
                             # Ahora, determinar cuál extremo de la trayectoria está más cerca a algún centro de bola
                             distancia_minima = float('inf')
@@ -351,12 +392,16 @@ class VideoProcessor:
                             
                             # Dibuja la parte de la trayectoria del taco más cercana a la bola
                             if extremo_cercano is not None:
+                                self.extremo_cercano = extremo_cercano
                                 cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
                                 # Preparar los datos para el callback
-                                self.cue_data = (tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), 5)  # El último número es el thickness
+                                self.prepare_cue_for_addition(tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), 5)
+                                taco_detected = True
 
                 else:
                     print("ROI vacío o de tamaño inválido.")
+        if not taco_detected:
+            self.prepare_cue_for_removal()
         return frame
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
@@ -411,6 +456,9 @@ class VideoProcessor:
         capture_thread.start()
         processing_thread.start()
 
+        # Antes del bucle while en start()
+        self.space.user_data = self  # Esto permite acceder a self dentro de los callbacks de Pymunk
+
         while corriendo:
             for evento in pygame.event.get():
                 if evento.type == QUIT:
@@ -428,6 +476,19 @@ class VideoProcessor:
             # Avanzar la simulación de Pymunk
             self.space.step(1/48.0)
 
+            #if hasattr(self, 'cue_data'):
+            #    self.space.add_post_step_callback(self.cue_callback, None)
+            #    delattr(self, 'cue_data')  # Elimina cue_data para evitar añadirlo múltiples veces
+
+            if hasattr(self, 'cue_data'):
+                self.space.add_post_step_callback(self.cue_callback, self.cue_data)
+                delattr(self, 'cue_data')
+            if hasattr(self, 'cue_removal_needed') and self.cue_removal_needed:
+                self.space.add_post_step_callback(self.remove_cue_callback, None)
+                self.cue_removal_needed = False
+            
+            self.apply_impact_force()
+            
             # Visualizar la simulación de Pymunk
             self.space.debug_draw(draw_options)
 
@@ -448,7 +509,7 @@ class VideoProcessor:
             frame_count += 1
 
             pygame.display.flip()  # Actualizar la pantalla
-            reloj.tick(60)  # 60 FPS
+            reloj.tick(48)  # 60 FPS
 
         # Esperar a que los hilos de captura y procesamiento finalicen
         capture_thread.join()
