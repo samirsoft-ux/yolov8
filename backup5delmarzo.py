@@ -37,7 +37,7 @@ class VideoProcessor:
     ELASTICIDAD_TACO = 1.0  # Considera definir una constante para esto
     FRICCION_TACO = 0.5
     MARGEN_TACO = 5  # Grosor del taco, usado como margen
-    VELOCIDAD_INICIAL_IMPACTO = 1200  # Un valor de velocidad inicial para la bola tras el impacto, ajusta según sea necesario
+    VELOCIDAD_INICIAL_IMPACTO = 700  # Un valor de velocidad inicial para la bola tras el impacto, ajusta según sea necesario
 
     def __init__(self, source_weights_path: str, ip_address: str, port: int, confidence_threshold: float = 0.3, iou_threshold: float = 0.7):
         self.ip_address = ip_address
@@ -246,7 +246,7 @@ class VideoProcessor:
 
         # Limita el cambio de ángulo para evitar saltos bruscos
         if self.ultimo_angulo_valido is not None:
-            delta_angulo = min(15, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
+            delta_angulo = min(10, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
             angulo_promedio = self.ultimo_angulo_valido + np.sign(angulo_promedio - self.ultimo_angulo_valido) * delta_angulo
 
         self.ultimo_angulo_valido = angulo_promedio
@@ -257,7 +257,7 @@ class VideoProcessor:
 
     def capture_video(self):
         #video_path = f"http://{self.ip_address}:{self.port}/video"
-        video_path = "data/len4.mp4"
+        video_path = "data/len2.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -392,75 +392,46 @@ class VideoProcessor:
         vector = np.array(vector)
         normal = np.array(normal) / np.linalg.norm(normal)  # Normalizar la normal
         return vector - 2 * np.dot(vector, normal) * normal
-    
-    def calcular_nuevas_velocidades(self, centro1, velocidad1, centro2, velocidad2, masa):
-        direccion_colision = centro2 - centro1
-        direccion_colision_unitaria = direccion_colision / np.linalg.norm(direccion_colision)
-        velocidad_relativa = velocidad1 - velocidad2
-        velocidad_colision = np.dot(velocidad_relativa, direccion_colision_unitaria)
-
-        if velocidad_colision > 0:
-            velocidad1_nueva = velocidad1 - (velocidad_colision * direccion_colision_unitaria)
-            velocidad2_nueva = velocidad2 + (velocidad_colision * direccion_colision_unitaria)
-        else:
-            velocidad1_nueva = velocidad1
-            velocidad2_nueva = velocidad2
-
-        return velocidad1_nueva, velocidad2_nueva
         
     # Función modificada para simular la trayectoria de impacto y posibles colisiones.
-    def simulate_impact_trajectory(self, frame, centro_bola_id, direccion_taco, velocidad_impacto, mesa_corners, current_active_balls, centros_bolas):    
-        masa = 1
+    def simulate_impact_trajectory(self, frame, centro_bola, direccion_taco, velocidad_impacto, mesa_corners):
         direccion_unitaria = direccion_taco / np.linalg.norm(direccion_taco)
-        punto_actual = np.array(centros_bolas[current_active_balls.index(centro_bola_id)])
-        velocidad_actual = direccion_unitaria * velocidad_impacto
+        punto_actual = np.array(centro_bola)
+        velocidad_actual = velocidad_impacto
 
-        # Continuar la simulación mientras la bola tenga velocidad significativa
-        while np.linalg.norm(velocidad_actual) > 1:
-            punto_siguiente = punto_actual + velocidad_actual
+        while velocidad_actual > 1:  # Umbral de velocidad para detener la simulación
+            punto_siguiente = punto_actual + direccion_unitaria * velocidad_actual
+
             colision_detectada = False
-
-            # Verificar colisión con bandas
             for i in range(len(mesa_corners)):
                 start_banda = mesa_corners[i]
                 end_banda = mesa_corners[(i + 1) % len(mesa_corners)]
                 punto_interseccion = self.line_intersection(punto_actual, punto_siguiente, start_banda, end_banda)
-                
+
                 if punto_interseccion:
-                    cv2.line(frame, tuple(punto_actual.astype(int)), tuple(np.array(punto_interseccion).astype(int)), (0, 0, 255), 2)
+                    # Dibujar la trayectoria hasta el punto de intersección
+                    cv2.line(frame, (int(punto_actual[0]), int(punto_actual[1])), (int(punto_interseccion[0]), int(punto_interseccion[1])), (0, 0, 255), 2)
+                    
                     direccion_banda = np.array(end_banda) - np.array(start_banda)
                     normal_banda = np.array([-direccion_banda[1], direccion_banda[0]])
-                    direccion_reflejada = self.reflect_vector(velocidad_actual, normal_banda)
-                    punto_actual = np.array(punto_interseccion)
-                    velocidad_actual = direccion_reflejada * 0.9
+                    direccion_reflejada = self.reflect_vector(direccion_unitaria, normal_banda)
+                    
+                    # Ajustar el punto actual al punto de intersección para la próxima iteración
+                    punto_actual = punto_interseccion
+                    direccion_unitaria = direccion_reflejada / np.linalg.norm(direccion_reflejada)
                     colision_detectada = True
-                    break
+                    # Reducir la velocidad para simular el impacto
+                    velocidad_actual *= 0.9
+                    break  # Maneja una colisión a la vez
 
-            # Si no hubo colisión con banda, verificar colisión con otras bolas
             if not colision_detectada:
-                for i, otro_centro in enumerate(centros_bolas):
-                    if current_active_balls[i] != centro_bola_id:
-                        distancia = np.linalg.norm(np.array(otro_centro) - punto_actual)
-                        if distancia <= 2 * self.average_ball_radius:
-                            centro_bola2 = np.array(otro_centro)
-                            velocidad_bola2 = np.array([0, 0])  # Asumir bola estática para simplificar
+                # Si no hay colisión, dibujar la trayectoria completa
+                cv2.line(frame, (int(punto_actual[0]), int(punto_actual[1])), (int(punto_siguiente[0]), int(punto_siguiente[1])), (0, 0, 255), 2)
+                # Detener la simulación si no hay colisión
+                break
 
-                            # Calcular nuevas velocidades
-                            velocidad1_nueva, velocidad2_nueva = self.calcular_nuevas_velocidades(punto_actual, velocidad_actual, centro_bola2, velocidad_bola2, masa)
-
-                            cv2.line(frame, tuple(punto_actual.astype(int)), tuple((punto_actual + velocidad1_nueva).astype(int)), (255, 0, 0), 2)
-                            cv2.line(frame, tuple(centro_bola2.astype(int)), tuple((centro_bola2 + velocidad2_nueva).astype(int)), (0, 255, 0), 2)
-                            
-                            punto_actual += velocidad1_nueva
-                            velocidad_actual = velocidad1_nueva * 0.9
-                            colision_detectada = True
-                            break
-
-                if not colision_detectada:
-                    cv2.line(frame, tuple(punto_actual.astype(int)), tuple((punto_actual + velocidad_actual).astype(int)), (0, 0, 255), 2)
-                    punto_actual += velocidad_actual
-
-                velocidad_actual *= 0.9
+            # Simula la pérdida de velocidad después de cada iteración (ajuste según sea necesario)
+            velocidad_actual *= 0.9  # Factor de desaceleración
         
     def detectar_colision_banda(self, punto_final, dimensiones_mesa):
         # Asumimos dimensiones_mesa como una tupla (ancho, largo)
@@ -539,8 +510,8 @@ class VideoProcessor:
 
         # Actualizar la lista de bolas activas
         self.active_balls = current_active_balls
-        #print(current_active_balls)
-        #print(centros_bolas)
+        print(current_active_balls)
+        print(centros_bolas)
         for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
 
@@ -608,23 +579,13 @@ class VideoProcessor:
                                             # Verificar si esta bola está más cerca que la registrada previamente
                                             if distancia <= self.average_ball_radius + VideoProcessor.MARGEN_TACO and distancia < distancia_minima:
                                                 distancia_minima = distancia
-                                                bola_mas_cercana = (centro_bola, direccion_taco, tracker_id)
+                                                bola_mas_cercana = (centro_bola, direccion_taco)
 
                 else:
                     print("ROI vacío o de tamaño inválido.")
         # Dibujar la trayectoria predicha para la bola más cercana, si hay alguna
         if bola_mas_cercana:
-            #self.simulate_impact_trajectory(frame, np.array(bola_mas_cercana[0]), bola_mas_cercana[1], VideoProcessor.VELOCIDAD_INICIAL_IMPACTO, self.mesa_corners)        
-            #self.simulate_impact_trajectory(frame, np.array(bola_mas_cercana[0]), bola_mas_cercana[1], VideoProcessor.VELOCIDAD_INICIAL_IMPACTO, self.mesa_corners, bola_mas_cercana[2]) # bola_mas_cercana[2] es el ID        
-            self.simulate_impact_trajectory(
-                frame=frame, 
-                centro_bola_id=bola_mas_cercana[2],  # ID de la bola
-                direccion_taco=direccion_taco,  # La dirección del taco calculada previamente
-                velocidad_impacto=VideoProcessor.VELOCIDAD_INICIAL_IMPACTO,  # Velocidad de impacto configurada
-                mesa_corners=self.mesa_corners,  # Las esquinas de la mesa para manejar las colisiones con bandas
-                current_active_balls=current_active_balls,  # Lista de IDs de bolas activas
-                centros_bolas=centros_bolas  # Lista de centros de bolas correspondientes
-            )
+            self.simulate_impact_trajectory(frame, np.array(bola_mas_cercana[0]), bola_mas_cercana[1], VideoProcessor.VELOCIDAD_INICIAL_IMPACTO, self.mesa_corners)        
         if not taco_detected:
             self.prepare_cue_for_removal()
         return frame
