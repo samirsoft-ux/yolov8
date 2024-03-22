@@ -4,10 +4,10 @@ from itertools import permutations
 import json
 import os
 
-ip_address = "192.168.137.229"
+ip_address = "192.168.137.35"
 port = 8080
-#video_path = "http://{}:{}/video".format(ip_address, port)
-video_path = "data/len2.mp4"
+video_path = "http://{}:{}/video".format(ip_address, port)
+#video_path = "data/len2.mp4"
 
 margeX=400
 margeY=300

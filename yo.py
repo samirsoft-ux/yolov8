@@ -8,12 +8,9 @@ import subprocess
 from ultralytics import YOLO
 import threading
 import queue
+import signal  # Importar el módulo signal
 import json
-import pymunk
-import pygame
-import pymunk.pygame_util
-from pygame.locals import QUIT
-import time
+from sklearn.decomposition import PCA
 
 # Intenta la calibración antes de iniciar el procesamiento de video
 try:
@@ -30,141 +27,32 @@ COLORS = sv.ColorPalette.default()
 torch.cuda.set_device(0)
 
 class VideoProcessor:
-    MASA_BOLA = 1
-    ELASTICIDAD_BOLAS = 0.9
-    FRICCION_BOLAS = 0.05
-    VELOCIDAD_TACO = 5  # Unidad simbólic
-    ELASTICIDAD_TACO = 1.0  # Considera definir una constante para esto
-    FRICCION_TACO = 0.5
-    MARGEN_TACO = 5  # Grosor del taco, usado como margen
-    VELOCIDAD_INICIAL_IMPACTO = 1200  # Un valor de velocidad inicial para la bola tras el impacto, ajusta según sea necesario
-
     def __init__(self, source_weights_path: str, ip_address: str, port: int, confidence_threshold: float = 0.3, iou_threshold: float = 0.7):
         self.ip_address = ip_address
         self.port = port
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
-        
         # Carga de las coordenadas de las esquinas de la mesa desde data.json
         with open('data.json', 'r') as file:
             data = json.load(file)
             self.mesa_corners = self.reordenar_esquinas(np.array(data['l_circle_projector']))
-        
         self.model = YOLO(source_weights_path)
         self.tracker = sv.ByteTrack()
         self.box_annotator = sv.BoxAnnotator(color=COLORS)
         self.frame_queue = queue.Queue(maxsize=10)
         self.shutdown_event = threading.Event()
-        self.space = self.setup_space()  # Configura el espacio de simulación de Pymunk
         self.historial_lineas = []  # Para almacenar las últimas posiciones y ángulos de la línea
-        self.max_historial = 3  # Número máximo de elementos en el historial
+        #####PRUEBA
+        ###ESTO PUEDE SER 15 O 10 Y SIRVE PARA PODER HACER MÁS SUAVE EL TACO OSEA QUE NO SEA TAN ERRÁTICO CUANDO ESTÁ ESTÁTICO
+        self.max_historial = 15  # Número máximo de elementos en el historial
         self.ultimo_angulo_valido = None # En tu inicialización de clase, agrega un valor para rastrear el último ángulo válido
-    
-        #Inicializaciones para simulación 2D
-        self.ball_updates = {}  # Para almacenar las actualizaciones de las bolas antes de aplicarlas
-        self.balls = {}  # Para almacenar las bolas presentes en el espacio de simulación
-        self.active_balls = []  # Lista para mantener los IDs de las bolas activas (detectadas)
-        #Calculo Radio 
-        self.initial_frames_for_average = 10  # Número de frames para calcular el promedio
-        self.detected_radii = []  # Para acumular los radios detectados
-        self.frames_processed = 0  # Contador de frames procesados
-        #Problemas de seguridad
-        self.balls_to_remove = set()
         
-        self.cue_removal_needed = False
+        #RADIO DE LA BOLA
+        self.radio_promedio_bolas = 0
+        self.radios_acumulados = []
+        self.frames_para_calculo = 100  # Número de frames durante los cuales se calculará el radio promedio
+        self.frame_actual = 0
         
-        self.ultimo_angulo = None
-        self.ultimo_tiempo = None
-        self.alpha_ema = 0.2  # Ajusta este valor según sea necesario
-    
-    #BOLAS----------------------------------------------
-    def add_ball_to_space(self, position, radius=10):
-        """
-        Añade una bola al espacio de Pymunk y devuelve su objeto Circle.
-        """
-        mass = VideoProcessor.MASA_BOLA  # Usar constante definida para la masa
-        moment = pymunk.moment_for_circle(mass, 0, radius, (0, 0))
-        body = pymunk.Body(mass, moment)
-        body.position = position
-        shape = pymunk.Circle(body, radius)
-        shape.elasticity = VideoProcessor.ELASTICIDAD_BOLAS  # Usar constante definida para la elasticidad
-        shape.friction = VideoProcessor.FRICCION_BOLAS  # Usar constante definida para la fricción
-        self.space.add(body, shape)
-        return shape
-    
-    #MEJORAR para las bolas
-    #Considera la interacción entre la bola y la mesa (por ejemplo, efectos de rotación o "spin") al definir las propiedades físicas, lo que puede requerir ajustes adicionales en las propiedades de las bolas y la mesa.
-    #Fricción (shape.friction): Un coeficiente de fricción de 0.9 para la bola podría ser ligeramente alto para una mesa de billar, que generalmente permite que las bolas deslicen suavemente. Las mesas de billar están diseñadas para minimizar la fricción, por lo que un valor más bajo podría ser más realista, alrededor de 0.2 a 0.4, dependiendo del material de la superficie y de cómo quieras que se comporte la bola después del impacto y durante el movimiento.
-
-    def prepare_ball_update(self, tracker_id, position, radius=None):
-        if radius is None:
-            # Usa el radio promedio si está disponible, de lo contrario usa un valor fijo
-            radius = getattr(self, 'average_ball_radius', 18)
-        self.ball_updates[tracker_id] = (position, radius)
-    
-    def process_ball_updates(self, space, data):
-        # Añadir o actualizar bolas
-        for tracker_id, (position, radius) in self.ball_updates.items():
-            if tracker_id in self.balls:
-                # Actualiza la posición de la bola existente
-                self.balls[tracker_id].body.position = position
-            else:
-                # Añade una nueva bola al espacio
-                self.balls[tracker_id] = self.add_ball_to_space(position, radius)  # Asegúrate de que esta función no modifique directamente el espacio
-        self.ball_updates.clear()
-
-        # Eliminar bolas no detectadas
-        current_active_balls = self.getCurrentActiveBalls()  # Asumiendo que esta función devuelve los tracker_id de las bolas actualmente activas
-        balls_to_remove = [ball_id for ball_id in self.balls if ball_id not in current_active_balls]
-        for ball_id in balls_to_remove:
-            ball_shape = self.balls[ball_id]
-            space.remove(ball_shape.body, ball_shape)  # Elimina la bola del espacio
-            del self.balls[ball_id]
-    
-    def getCurrentActiveBalls(self):
-        # Retorna la lista actual de tracker_id de bolas activas
-        return self.active_balls
-            
-    def remove_undetected_balls(self, current_active_balls):
-        balls_to_remove = set(self.balls.keys()) - set(current_active_balls)
-        self.balls_to_remove.update(balls_to_remove)
-    #BOLAS----------------------------------------------
-    
-    #TACO------------------------------------------------------
-    
-    def prepare_cue_for_addition(self, start_point, end_point, thickness=5):
-        """
-        Prepara los datos necesarios para añadir el taco al espacio de Pymunk usando un callback.
-        """
-        # Almacena los datos del taco para usarlos en el callback
-        self.cue_data = (start_point, end_point, thickness)
-    
-    def cue_callback(self, space, data):
-        if hasattr(self, 'cue_data'):
-            start_point, end_point, thickness = self.cue_data
-            if hasattr(self, 'cue_shape'):
-                space.remove(self.cue_shape.body, self.cue_shape)
-
-            body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
-            shape = pymunk.Segment(body, start_point, end_point, thickness)
-            shape.elasticity = VideoProcessor.ELASTICIDAD_TACO  # Considera definir una constante para esto
-            shape.friction = VideoProcessor.FRICCION_TACO  # Considera definir una constante para esto
-            space.add(body, shape)
-            self.cue_shape = shape
-    
-    def prepare_cue_for_removal(self):
-        if hasattr(self, 'cue_shape'):
-            self.cue_removal_needed = True
-            
-    def remove_cue_callback(self, space, data):
-        if hasattr(self, 'cue_shape'):
-            space.remove(self.cue_shape.body, self.cue_shape)
-            del self.cue_shape
-
-    
-    #TACO------------------------------------------------------
-    
-    # Función para reordenar las esquinas
     def reordenar_esquinas(self, corners):
         # Asumimos que corners es una lista de puntos (x, y) que representan las esquinas de la mesa
 
@@ -184,61 +72,7 @@ class VideoProcessor:
 
         return corners_ordenados
     
-    def setup_space(self):
-        # Definición de constantes para la configuración del espacio
-        ELASTICIDAD_BANDAS = 0.8
-        FRICCION_MESA = 0.02
-
-        space = pymunk.Space()
-        space.gravity = (0, 0)  # No hay gravedad en una mesa de billar
-
-        # Añadir bordes de la mesa como objetos estáticos
-        for i in range(len(self.mesa_corners)):
-            # Tomar cada par de puntos consecutivos como un segmento
-            start = tuple(self.mesa_corners[i])  # Convertir a tupla
-            end = tuple(self.mesa_corners[(i + 1) % len(self.mesa_corners)])  # Convertir a tupla y ciclo al primer punto después del último
-            
-            shape = pymunk.Segment(space.static_body, start, end, 0.5)  # 0.5 es el grosor del borde
-            shape.elasticity = ELASTICIDAD_BANDAS  # Coeficiente de restitución para simular el rebote de las bolas en las bandas
-            shape.friction = FRICCION_MESA  # Fricción de las bandas/mesa para simular la interacción con las bolas
-            space.add(shape)
-
-        return space
-    
-    
-    """def suavizar_linea(self, tiempo_actual):
-        if len(self.historial_lineas) == 0:
-            return None, None
-
-        centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
-        angulo_promedio = np.mean([angulo for _, angulo in self.historial_lineas])
-
-        # Cálculo de velocidad y suavizado basado en velocidad
-        if self.ultimo_tiempo is not None and self.ultimo_angulo is not None:
-            delta_tiempo = tiempo_actual - self.ultimo_tiempo
-            cambio_angulo = abs(angulo_promedio - self.ultimo_angulo)
-
-            # Asegurar que delta_tiempo no sea cero para evitar división por cero
-            if delta_tiempo > 0:
-                velocidad = cambio_angulo / delta_tiempo
-            else:
-                velocidad = 0  # O asignar un valor predeterminado adecuado
-
-            if velocidad > 0.01:  # Define umbral_velocidad_alta según tus observaciones
-                factor_suavizado = 0.1
-            else:
-                factor_suavizado = 0.5
-
-            angulo_suavizado = self.aplicar_ema(angulo_promedio, self.ultimo_angulo, factor_suavizado)
-        else:
-            angulo_suavizado = angulo_promedio
-
-        self.ultimo_tiempo = tiempo_actual
-        self.ultimo_angulo = angulo_suavizado
-
-        return centro_promedio, angulo_suavizado"""
-        
-    def suavizar_linea(self):
+    """def suavizar_linea(self):
         if len(self.historial_lineas) == 0:
             return None, None
         centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
@@ -246,18 +80,32 @@ class VideoProcessor:
 
         # Limita el cambio de ángulo para evitar saltos bruscos
         if self.ultimo_angulo_valido is not None:
-            delta_angulo = min(15, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
+            delta_angulo = min(10, abs(angulo_promedio - self.ultimo_angulo_valido))  # Limita a 10 grados de cambio
+            angulo_promedio = self.ultimo_angulo_valido + np.sign(angulo_promedio - self.ultimo_angulo_valido) * delta_angulo
+
+        self.ultimo_angulo_valido = angulo_promedio
+        return centro_promedio, angulo_promedio"""
+        
+    def suavizar_linea(self):
+        if len(self.historial_lineas) == 0:
+            return None, None
+        centro_promedio = np.mean([centro for centro, _ in self.historial_lineas], axis=0)
+        angulo_promedio = np.mean([angulo for _, angulo in self.historial_lineas])
+
+        # Ajuste dinámico basado en la variabilidad reciente de los ángulos
+        variabilidad_angulo = np.std([angulo for _, angulo in self.historial_lineas])
+        limite_cambio = max(5, min(10, 10 - variabilidad_angulo))  # Ejemplo de ajuste dinámico
+
+        if self.ultimo_angulo_valido is not None:
+            delta_angulo = min(limite_cambio, abs(angulo_promedio - self.ultimo_angulo_valido))
             angulo_promedio = self.ultimo_angulo_valido + np.sign(angulo_promedio - self.ultimo_angulo_valido) * delta_angulo
 
         self.ultimo_angulo_valido = angulo_promedio
         return centro_promedio, angulo_promedio
 
-    def aplicar_ema(self, valor_actual, valor_ema_anterior, alpha):
-        return (alpha * valor_actual) + ((1 - alpha) * valor_ema_anterior)
-
     def capture_video(self):
-        #video_path = f"http://{self.ip_address}:{self.port}/video"
-        video_path = "data/len4.mp4"
+        video_path = f"http://{self.ip_address}:{self.port}/video"
+        #video_path = "data/len2.mp4"
         vid = cv2.VideoCapture(video_path)
         while not self.shutdown_event.is_set():
             ret, frame = vid.read()
@@ -275,6 +123,8 @@ class VideoProcessor:
             if not self.frame_queue.empty():
                 frame_start_time = time.time()
                 frame = self.frame_queue.get()
+                # Dibuja el círculo en el centro de la mesa
+                #frame = self.dibujar_circulo_centro_mesa(frame)
                 
                 processed_frame = self.process_frame(frame=frame)
                 frame_end_time = time.time()
@@ -290,6 +140,8 @@ class VideoProcessor:
 
                 cv2.putText(processed_frame, f"FPS: {average_fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 3)
                 cv2.putText(processed_frame, f"Latency: {average_latency*1000:.2f} ms", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 3)
+                
+                
                 
                 cv2.imshow("Processed Frame", processed_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -331,216 +183,95 @@ class VideoProcessor:
                             confidence=detections.confidence[valid_detections_indices] if detections.confidence is not None else None,
                             tracker_id=detections.tracker_id[valid_detections_indices] if detections.tracker_id is not None else None)
     
-    #Colisiones
-    def distancia_punto_segmento(self, punto, segmento_inicio, segmento_final):
-        # Convertir a numpy arrays para facilitar los cálculos
-        p = np.array(punto)
-        a = np.array(segmento_inicio)
-        b = np.array(segmento_final)
-        # Proyectar el punto sobre la línea definida por el segmento
-        ap = p - a
-        ab = b - a
-        resultado = a + np.dot(ap, ab) / np.dot(ab, ab) * ab
-        # Verificar si el resultado está dentro del segmento
-        if np.dot(ab, resultado - a) < 0 or np.dot(-ab, resultado - b) < 0:
-            # El punto proyectado está fuera del segmento, devolver la distancia al punto más cercano
-            return min(np.linalg.norm(p - a), np.linalg.norm(p - b))
-        # Devolver la distancia del punto al segmento
-        return np.linalg.norm(p - resultado)
+    """##PRUEBA
+    def calcular_centro_mesa(self):
+        if self.mesa_corners is not None and len(self.mesa_corners) > 0:
+            centro_mesa = np.mean(self.mesa_corners, axis=0)
+            return centro_mesa
+        return None
+    def dibujar_circulo_centro_mesa(self, frame):
+        centro_mesa = self.calcular_centro_mesa()
+        if centro_mesa is not None and self.radio_promedio_bolas > 0:
+            # Convierte el centro de la mesa a una tupla de enteros para que OpenCV lo acepte
+            centro_mesa = tuple(np.round(centro_mesa).astype(int))
+            # Dibuja el círculo rojo en el centro de la mesa
+            cv2.circle(frame, centro_mesa, int(self.radio_promedio_bolas), (0, 0, 255), 2)
+        return frame
+    ##"""
     
-    """def simulate_impact_trajectory(self, frame, centro_bola, direccion_taco, distancia_impacto):
-        # Convertir dirección del taco a vector unitario
-        direccion_unitaria = direccion_taco / np.linalg.norm(direccion_taco)
-        # Calcular punto final basado en la velocidad inicial del impacto
-        punto_final = centro_bola + direccion_unitaria * distancia_impacto
-        # Dibujar la trayectoria predicha
-        cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(punto_final[0]), int(punto_final[1])), (0, 0, 255), 2)"""
-    
-    def line_intersection(self, p0, p1, p2, p3):
-        """
-        Calcula el punto de intersección entre dos segmentos de línea dados por puntos (p0, p1) y (p2, p3).
-        Si no hay intersección, devuelve None.
-        """
-        s10_x = p1[0] - p0[0]
-        s10_y = p1[1] - p0[1]
-        s32_x = p3[0] - p2[0]
-        s32_y = p3[1] - p2[1]
-
-        denom = s10_x * s32_y - s32_x * s10_y
-        if denom == 0: return None  # Colineales
-
-        denom_is_positive = denom > 0
-        s02_x = p0[0] - p2[0]
-        s02_y = p0[1] - p2[1]
-        s_numer = s10_x * s02_y - s10_y * s02_x
-        if (s_numer < 0) == denom_is_positive: return None  # No hay intersección
-
-        t_numer = s32_x * s02_y - s32_y * s02_x
-        if (t_numer < 0) == denom_is_positive: return None  # No hay intersección
-
-        if ((s_numer > denom) == denom_is_positive) or ((t_numer > denom) == denom_is_positive): return None  # No hay intersección
-
-        # Intersección encontrada
-        t = t_numer / denom
-        intersection_point = (p0[0] + (t * s10_x), p0[1] + (t * s10_y))
-        return intersection_point
-    
-    def reflect_vector(self, vector, normal):
-        """
-        Refleja un vector sobre un plano definido por su normal.
-        """
-        vector = np.array(vector)
-        normal = np.array(normal) / np.linalg.norm(normal)  # Normalizar la normal
-        return vector - 2 * np.dot(vector, normal) * normal
-    
-    def calcular_nuevas_velocidades(self, centro1, velocidad1, centro2, velocidad2, masa):
-        direccion_colision = centro2 - centro1
-        direccion_colision_unitaria = direccion_colision / np.linalg.norm(direccion_colision)
-        velocidad_relativa = velocidad1 - velocidad2
-        velocidad_colision = np.dot(velocidad_relativa, direccion_colision_unitaria)
-
-        if velocidad_colision > 0:
-            velocidad1_nueva = velocidad1 - (velocidad_colision * direccion_colision_unitaria)
-            velocidad2_nueva = velocidad2 + (velocidad_colision * direccion_colision_unitaria)
-        else:
-            velocidad1_nueva = velocidad1
-            velocidad2_nueva = velocidad2
-
-        return velocidad1_nueva, velocidad2_nueva
-        
-    # Función modificada para simular la trayectoria de impacto y posibles colisiones.
-    def simulate_impact_trajectory(self, frame, centro_bola_id, direccion_taco, velocidad_impacto, mesa_corners, current_active_balls, centros_bolas):    
-        masa = 1
-        direccion_unitaria = direccion_taco / np.linalg.norm(direccion_taco)
-        punto_actual = np.array(centros_bolas[current_active_balls.index(centro_bola_id)])
-        velocidad_actual = direccion_unitaria * velocidad_impacto
-
-        # Continuar la simulación mientras la bola tenga velocidad significativa
-        while np.linalg.norm(velocidad_actual) > 1:
-            punto_siguiente = punto_actual + velocidad_actual
-            colision_detectada = False
-
-            # Verificar colisión con bandas
-            for i in range(len(mesa_corners)):
-                start_banda = mesa_corners[i]
-                end_banda = mesa_corners[(i + 1) % len(mesa_corners)]
-                punto_interseccion = self.line_intersection(punto_actual, punto_siguiente, start_banda, end_banda)
-                
-                if punto_interseccion:
-                    cv2.line(frame, tuple(punto_actual.astype(int)), tuple(np.array(punto_interseccion).astype(int)), (0, 0, 255), 2)
-                    direccion_banda = np.array(end_banda) - np.array(start_banda)
-                    normal_banda = np.array([-direccion_banda[1], direccion_banda[0]])
-                    direccion_reflejada = self.reflect_vector(velocidad_actual, normal_banda)
-                    punto_actual = np.array(punto_interseccion)
-                    velocidad_actual = direccion_reflejada * 0.9
-                    colision_detectada = True
-                    break
-
-            # Si no hubo colisión con banda, verificar colisión con otras bolas
-            if not colision_detectada:
-                for i, otro_centro in enumerate(centros_bolas):
-                    if current_active_balls[i] != centro_bola_id:
-                        distancia = np.linalg.norm(np.array(otro_centro) - punto_actual)
-                        if distancia <= 2 * self.average_ball_radius:
-                            centro_bola2 = np.array(otro_centro)
-                            velocidad_bola2 = np.array([0, 0])  # Asumir bola estática para simplificar
-
-                            # Calcular nuevas velocidades
-                            velocidad1_nueva, velocidad2_nueva = self.calcular_nuevas_velocidades(punto_actual, velocidad_actual, centro_bola2, velocidad_bola2, masa)
-
-                            cv2.line(frame, tuple(punto_actual.astype(int)), tuple((punto_actual + velocidad1_nueva).astype(int)), (255, 0, 0), 2)
-                            cv2.line(frame, tuple(centro_bola2.astype(int)), tuple((centro_bola2 + velocidad2_nueva).astype(int)), (0, 255, 0), 2)
-                            
-                            punto_actual += velocidad1_nueva
-                            velocidad_actual = velocidad1_nueva * 0.9
-                            colision_detectada = True
-                            break
-
-                if not colision_detectada:
-                    cv2.line(frame, tuple(punto_actual.astype(int)), tuple((punto_actual + velocidad_actual).astype(int)), (0, 0, 255), 2)
-                    punto_actual += velocidad_actual
-
-                velocidad_actual *= 0.9
-        
-    def detectar_colision_banda(self, punto_final, dimensiones_mesa):
-        # Asumimos dimensiones_mesa como una tupla (ancho, largo)
-        if punto_final[0] <= 0 or punto_final[0] >= dimensiones_mesa[0]:
-            # Colisión con banda izquierda o derecha
-            return True
-        if punto_final[1] <= 0 or punto_final[1] >= dimensiones_mesa[1]:
-            # Colisión con banda superior o inferior
-            return True
-        return False
-
-    def calcular_rebote(self, punto_colision, direccion_unitaria, es_horizontal):
-        if es_horizontal:
-            # Rebote en banda horizontal, invertir componente Y de la dirección
-            direccion_reflejada = np.array([direccion_unitaria[0], -direccion_unitaria[1]])
-        else:
-            # Rebote en banda vertical, invertir componente X de la dirección
-            direccion_reflejada = np.array([-direccion_unitaria[0], direccion_unitaria[1]])
-        return direccion_reflejada
-
-    def dibujar_bandas(self, frame):
-        for i in range(len(self.mesa_corners)):
-            start = self.mesa_corners[i]
-            end = self.mesa_corners[(i + 1) % len(self.mesa_corners)]
-            cv2.line(frame, start, end, (255, 0, 0), 2)  # Dibuja la banda con color rojo y grosor 2
-
-    
-    """def aplicar_impulso_bola(self, bola, direccion_impulso, magnitud_impulso):
-        # Convertir la dirección a un vector unitario (normalizado)
-        direccion_unitaria = direccion_impulso / np.linalg.norm(direccion_impulso)
-        impulso = direccion_unitaria * magnitud_impulso
-        # Aplicar el impulso al cuerpo de la bola en Pymunk
-        bola.body.apply_impulse_at_local_point(impulso)"""
-        
-    def handle_detections(self, frame, detections):
-        self.dibujar_bandas(frame)
-        tiempo_actual = time.time()
-        # No se modifican los centros de las bolas para la lógica de la trayectoria del taco
-        centros_bolas = []
-        current_active_balls = []
-        taco_detected = False
-        
-        # Inicializar variables para encontrar la bola más cercana
+    #CALCULAR EL CHOQUE DEL TACO CON UNA BOLA
+    def colision_trayectoria(self, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
+        punto_colision_cercano = None
         distancia_minima = float('inf')
-        bola_mas_cercana = None
-        direccion_taco = None
         
-        if self.frames_processed < self.initial_frames_for_average:
+        # Ajusta el radio de las bolas para considerar el grosor del taco
+        radio_efectivo = radio_bolas + grosor_taco / 2
+        
+        for centro_bola in centros_bolas:
+            # Calcula el punto en la trayectoria del taco más cercano al centro de la bola
+            punto_mas_cercano, distancia_al_centro = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+            
+            # Si el punto más cercano está dentro del radio efectivo de la bola, hay una colisión
+            if distancia_al_centro <= radio_efectivo:
+                # Verifica si este es el punto de colisión más cercano encontrado hasta ahora
+                if distancia_al_centro < distancia_minima:
+                    distancia_minima = distancia_al_centro
+                    punto_colision_cercano = punto_mas_cercano
+
+        # Si encontramos un punto de colisión, retorna verdadero y el punto
+        if punto_colision_cercano is not None:
+            return True, punto_colision_cercano
+        else:
+            return False, None
+    
+    def calcular_punto_mas_cercano_y_distancia(self, linea_inicio, direccion, punto):
+        # Normaliza la dirección
+        direccion_norm = direccion / np.linalg.norm(direccion)
+        
+        # Vector desde el inicio de la línea al punto
+        inicio_a_punto = punto - linea_inicio
+        
+        # Proyección escalar del vector inicio_a_punto en la dirección de la línea
+        t = np.dot(inicio_a_punto, direccion_norm)
+        
+        # Calcula el punto más cercano
+        punto_mas_cercano = linea_inicio + t * direccion_norm
+        
+        # Calcula la distancia desde el punto más cercano al centro de la bola
+        distancia = np.linalg.norm(punto - punto_mas_cercano)
+        
+        return punto_mas_cercano, distancia
+    
+    # LA CONDICIONAL ES QUE ESTE MÁS CERCA DEL CENTRO DE UNA BOLA   
+    def handle_detections(self, frame, detections):
+        centros_bolas = []
+
+        #CALCULAR EL RADIO DE LAS BOLAS O BOLA
+        if self.frame_actual < self.frames_para_calculo:
+            radios_bolas = []
+
             for i, bbox in enumerate(detections.xyxy):
                 class_id = detections.class_id[i]
-                if class_id in [0, 1]:  # Bolas
-                    radio = ((bbox[2] - bbox[0]) + (bbox[3] - bbox[1])) / 4
-                    self.detected_radii.append(radio)
+                if class_id in [0, 1]:  # Suponiendo que 0 y 1 son IDs para las bolas
+                    x1, y1, x2, y2 = bbox
+                    radio = ((x2 - x1) + (y2 - y1)) / 4
+                    self.radios_acumulados.append(radio)
+            
+            self.frame_actual += 1
 
-            self.frames_processed += 1
+        # Calcula el radio promedio solo después de acumular datos de los primeros N frames
+        if self.frame_actual == self.frames_para_calculo and self.radios_acumulados:
+            self.radio_promedio_bolas = sum(self.radios_acumulados) / len(self.radios_acumulados)
+            #print(f"Radio promedio calculado después de {self.frames_para_calculo} frames: {self.radio_promedio_bolas}")
 
-            if self.frames_processed == self.initial_frames_for_average:
-                if self.detected_radii:
-                    self.average_ball_radius = sum(self.detected_radii) / len(self.detected_radii)
-                    print (self.average_ball_radius)
-                else:
-                    self.average_ball_radius = 18  # Valor fijo si no hay detecciones
-        
-        # Procesamiento de detecciones para bolas y actualización/preparación para Pymunk
+        # Primero, recopilar los centros de todas las bolas detectadas
         for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
-            tracker_id = detections.tracker_id[i]
-
             if class_id in [0, 1]:  # Bolas
                 centro_bola_x = (bbox[0] + bbox[2]) / 2
                 centro_bola_y = (bbox[1] + bbox[3]) / 2
                 centros_bolas.append((centro_bola_x, centro_bola_y))
-                # Actualizar o añadir la bola en el espacio de Pymunk de forma preparatoria
-                self.prepare_ball_update(tracker_id, (centro_bola_x, centro_bola_y))
-                current_active_balls.append(tracker_id)
-
-        # Actualizar la lista de bolas activas
-        self.active_balls = current_active_balls
-        #print(current_active_balls)
-        #print(centros_bolas)
+        
         for i, bbox in enumerate(detections.xyxy):
             class_id = detections.class_id[i]
 
@@ -552,10 +283,29 @@ class VideoProcessor:
                 if x2 > x1 and y2 > y1:
                     roi = frame[y1:y2, x1:x2]
                     gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    ####ERROR########
                     blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
                     _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                     contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    ####ERROR######## AQUÍ HAY UN PROBLEMA Y ES QUE SI NO HAY BUENA ILUMINACIÓNLA UMBRALIZACIÓN DE ARRIBA SE PIERDE Y YA NO SE DETECTA BIEN LOS CONTORNOS (TENER EN CUENTA)
+                    ####################TAREA#######################
 
+                    """###PRUEBA PARA VER CÓMO ESTÁ LA UMBRALIZACIÓN
+                    #Convertir binary_roi a BGR para dibujar contornos en color si es necesario
+                    if len(binary_roi.shape) < 3:
+                        binary_roi_color = cv2.cvtColor(binary_roi, cv2.COLOR_GRAY2BGR)
+                    else:
+                        binary_roi_color = binary_roi.copy()
+
+                    # Dibuja todos los contornos encontrados
+                    # -1 significa dibujar todos los contornos
+                    # (0, 255, 0) es el color del contorno (verde en este caso)
+                    # 2 es el grosor de la línea del contorno
+                    cv2.drawContours(binary_roi_color, contornos, -1, (0, 255, 0), 2)
+
+                    # Mostrar la imagen con los contornos dibujados
+                    cv2.imshow('Contornos Detectados', binary_roi_color)"""
+                    
                     if contornos:
                         contorno_taco = max(contornos, key=cv2.contourArea)
                         rect = cv2.minAreaRect(contorno_taco)
@@ -564,69 +314,65 @@ class VideoProcessor:
                         if ancho < alto:
                             angulo += 90
 
+                        grosor_taco = min(ancho, alto)  # Consideramos el menor de los lados como el grosor
+                        
                         self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
                         if len(self.historial_lineas) > self.max_historial:
                             self.historial_lineas.pop(0)
 
-                        #centro_suavizado, angulo_suavizado = self.suavizar_linea(tiempo_actual)
                         centro_suavizado, angulo_suavizado = self.suavizar_linea()
 
+                        """#####PRUEBA SIRVE PARA VER CÓMO ES QUE SE ESTÁ CALCULANDO LA DIRECCIÓN DEL TACO
+                        # Dibujar el rectángulo que encierra el taco
+                        box = cv2.boxPoints(((centro[0] + x1, centro[1] + y1), (ancho, alto), angulo))
+                        box = np.int0(box)
+                        cv2.drawContours(frame, [box], 0, (0, 0, 255), 2)  # Dibuja con contorno rojo
+
+                        # Calcular la dirección y dibujarla
+                        direccion = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                        punto_inicio = np.array(centro_suavizado)
+                        punto_final = punto_inicio + direccion * 100  # Ajusta la longitud de la línea de dirección según sea necesario
+
+                        # Dibujar la línea de dirección
+                        cv2.line(frame, tuple(np.int32(punto_inicio)), tuple(np.int32(punto_final)), (255, 255, 0), 2)  # Línea azul claro
+
+                        # Opcionalmente, puedes dibujar un círculo en el centro_suavizado para marcar el punto de inicio
+                        cv2.circle(frame, tuple(np.int32(centro_suavizado)), 5, (0, 255, 0), -1)  # Punto verde"""
+                        
                         if centro_suavizado is not None and angulo_suavizado is not None:
                             direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
-                            longitud_linea = max(frame.shape) * 2
-                            punto_inicio_suavizado = np.array(centro_suavizado) - direccion_suavizada * longitud_linea / 2
-                            punto_final_suavizado = np.array(centro_suavizado) + direccion_suavizada * longitud_linea / 2
-
-                            distancia_minima = float('inf')
-                            extremo_cercano = None
+                            
+                            # Encuentra la primera bola que choca basado en la distancia al centro de la trayectoria del taco
+                            bola_primera_colision = None
+                            distancia_minima_colision = float('inf')
                             for centro_bola in centros_bolas:
-                                distancia_inicio = np.linalg.norm(punto_inicio_suavizado - centro_bola)
-                                distancia_final = np.linalg.norm(punto_final_suavizado - centro_bola)
-                                if distancia_inicio < distancia_minima:
-                                    distancia_minima = distancia_inicio
-                                    extremo_cercano = punto_inicio_suavizado
-                                if distancia_final < distancia_minima:
-                                    distancia_minima = distancia_final
-                                    extremo_cercano = punto_final_suavizado
-
-                            if extremo_cercano is not None:
-                                cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), (0, 255, 0), 2)
-                                # Preparar los datos para el callback
-                                self.prepare_cue_for_addition(tuple(np.int32(centro_suavizado)), tuple(np.int32(extremo_cercano)), 5)
-                                taco_detected = True
-                                if taco_detected:
-                                    start_point = tuple(np.int32(centro_suavizado))
-                                    end_point = tuple(np.int32(extremo_cercano))
-                                    direccion_taco = np.array(end_point) - np.array(start_point)
-
-                                    for tracker_id in current_active_balls:
-                                        if tracker_id in self.balls:
-                                            bola = self.balls[tracker_id]
-                                            centro_bola = bola.body.position
-                                            distancia = self.distancia_punto_segmento(centro_bola, start_point, end_point)
-
-                                            # Verificar si esta bola está más cerca que la registrada previamente
-                                            if distancia <= self.average_ball_radius + VideoProcessor.MARGEN_TACO and distancia < distancia_minima:
-                                                distancia_minima = distancia
-                                                bola_mas_cercana = (centro_bola, direccion_taco, tracker_id)
-
+                                punto_mas_cercano, distancia = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+                                if distancia < distancia_minima_colision:
+                                    distancia_minima_colision = distancia
+                                    bola_primera_colision = centro_bola
+                            
+                            if bola_primera_colision:
+                                # Ahora consideramos el grosor del taco en la verificación de colisión
+                                colision, punto_colision = self.colision_trayectoria(centro_suavizado, direccion_suavizada, [bola_primera_colision], self.radio_promedio_bolas, grosor_taco)
+                                if colision:
+                                    # Dibuja la trayectoria hasta el punto de colisión
+                                    cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_colision)), (0, 255, 0), 2)
+                                else:
+                                    # Si no hay colisión directa, considera la trayectoria opuesta
+                                    direccion_opuesta = -direccion_suavizada
+                                    colision_opuesta, punto_colision_opuesto = self.colision_trayectoria(centro_suavizado, direccion_opuesta, [bola_primera_colision], self.radio_promedio_bolas, grosor_taco)
+                                    
+                                    if colision_opuesta:
+                                        # Dibuja la trayectoria opuesta hasta el punto de colisión
+                                        cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_colision_opuesto)), (0, 255, 0), 2)                                        
+                                    else:
+                                        # Si ninguna trayectoria resulta en colisión, dibuja la trayectoria original completa
+                                        longitud_linea = max(frame.shape) * 2
+                                        punto_final_original = centro_suavizado + direccion_suavizada * longitud_linea
+                                        cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_final_original)), (0, 255, 0), 2)
+                            
                 else:
                     print("ROI vacío o de tamaño inválido.")
-        # Dibujar la trayectoria predicha para la bola más cercana, si hay alguna
-        if bola_mas_cercana:
-            #self.simulate_impact_trajectory(frame, np.array(bola_mas_cercana[0]), bola_mas_cercana[1], VideoProcessor.VELOCIDAD_INICIAL_IMPACTO, self.mesa_corners)        
-            #self.simulate_impact_trajectory(frame, np.array(bola_mas_cercana[0]), bola_mas_cercana[1], VideoProcessor.VELOCIDAD_INICIAL_IMPACTO, self.mesa_corners, bola_mas_cercana[2]) # bola_mas_cercana[2] es el ID        
-            self.simulate_impact_trajectory(
-                frame=frame, 
-                centro_bola_id=bola_mas_cercana[2],  # ID de la bola
-                direccion_taco=direccion_taco,  # La dirección del taco calculada previamente
-                velocidad_impacto=VideoProcessor.VELOCIDAD_INICIAL_IMPACTO,  # Velocidad de impacto configurada
-                mesa_corners=self.mesa_corners,  # Las esquinas de la mesa para manejar las colisiones con bandas
-                current_active_balls=current_active_balls,  # Lista de IDs de bolas activas
-                centros_bolas=centros_bolas  # Lista de centros de bolas correspondientes
-            )
-        if not taco_detected:
-            self.prepare_cue_for_removal()
         return frame
 
     def annotate_frame(self, frame: np.ndarray, detections) -> np.ndarray:
@@ -655,167 +401,24 @@ class VideoProcessor:
                 cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         return annotated_frame
-        
+    
     def start(self):
-        # Inicializar Pygame y configurar la ventana
-        pygame.init()
-        pantalla = pygame.display.set_mode((1920, 1080))
-        reloj = pygame.time.Clock()
-        corriendo = True
-        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
+        def signal_handler(sig, frame):
+            print('Deteniendo los hilos...')
+            self.shutdown_event.set()
 
-        font = pygame.font.Font(None, 36)  # Fuente para el texto de rendimiento
+        signal.signal(signal.SIGINT, signal_handler)
 
-        # Variables para calcular FPS y latencia
-        frame_count = 0
-        start_time = pygame.time.get_ticks()
-        fps = 0  # Inicializa FPS
-        latency = 0  # Inicializa la latencia
-
-        # Configuración de colores y visualización
-        color_fondo = (0, 0, 0)  # Fondo negro para proyección
-
-        # Iniciar los hilos de captura y procesamiento de video
         capture_thread = threading.Thread(target=self.capture_video)
         processing_thread = threading.Thread(target=self.process_video)
+
         capture_thread.start()
         processing_thread.start()
 
-        # Antes del bucle while en start()
-        self.space.user_data = self  # Esto permite acceder a self dentro de los callbacks de Pymunk
-
-        while corriendo:
-            for evento in pygame.event.get():
-                if evento.type == QUIT:
-                    corriendo = False
-                    self.shutdown_event.set()
-
-            frame_start_time = time.time()  # Inicio de procesamiento del frame actual
-            
-            pantalla.fill(color_fondo)  # Fondo blanco
-
-            # Programar el post-step callback para procesar actualizaciones de bolas
-            # Hacerlo aquí asegura que se procesen después del próximo paso de simulación
-            self.space.add_post_step_callback(self.process_ball_updates, None)
-
-            # Avanzar la simulación de Pymunk
-            self.space.step(1/48.0)
-
-            #if hasattr(self, 'cue_data'):
-            #    self.space.add_post_step_callback(self.cue_callback, None)
-            #    delattr(self, 'cue_data')  # Elimina cue_data para evitar añadirlo múltiples veces
-
-            if hasattr(self, 'cue_data'):
-                self.space.add_post_step_callback(self.cue_callback, self.cue_data)
-                delattr(self, 'cue_data')
-            if hasattr(self, 'cue_removal_needed') and self.cue_removal_needed:
-                self.space.add_post_step_callback(self.remove_cue_callback, None)
-                self.cue_removal_needed = False
-            
-            # Visualizar la simulación de Pymunk
-            self.space.debug_draw(draw_options)
-
-            # Cálculo de FPS y latencia (solo se actualiza cada segundo)
-            current_time = pygame.time.get_ticks()
-            if current_time - start_time > 1000:
-                fps = frame_count / ((current_time - start_time) / 1000.0)
-                latency = (time.time() - frame_start_time) * 1000  # Latencia en milisegundos
-                start_time = current_time
-                frame_count = 0
-
-            # Mostrar FPS y latencia constantemente
-            fps_text = font.render(f"FPS: {fps:.2f}", True, (0, 255, 0))
-            latency_text = font.render(f"Latency: {latency:.2f} ms", True, (0, 255, 0))
-            pantalla.blit(fps_text, (50, 50))
-            pantalla.blit(latency_text, (50, 90))
-
-            frame_count += 1
-
-            pygame.display.flip()  # Actualizar la pantalla
-            reloj.tick(48)  # 60 FPS
-
-        # Esperar a que los hilos de captura y procesamiento finalicen
         capture_thread.join()
         processing_thread.join()
-        pygame.quit()
+
         cv2.destroyAllWindows()
-        
-    """def start(self):
-        # Inicializar Pygame y configurar la ventana
-        pygame.init()
-        pantalla = pygame.display.set_mode((1920, 1080))
-        reloj = pygame.time.Clock()
-        corriendo = True
-        draw_options = pymunk.pygame_util.DrawOptions(pantalla)
-        draw_options.flags = pymunk.SpaceDebugDrawOptions.DRAW_SHAPES  # Solo dibujar formas, no conexiones ni colisiones
-
-        font = pygame.font.Font(None, 36)  # Fuente para el texto de rendimiento
-
-        # Configuración de colores y visualización
-        color_fondo = (0, 0, 0)  # Fondo negro para proyección
-        color_bola = (255, 255, 255)  # Contornos blancos para las bolas
-
-        # Variables para calcular FPS y latencia
-        frame_count = 0
-        start_time = pygame.time.get_ticks()
-        fps = 0  # Inicializa FPS
-        latency = 0  # Inicializa la latencia
-
-        # Iniciar los hilos de captura y procesamiento de video
-        capture_thread = threading.Thread(target=self.capture_video)
-        processing_thread = threading.Thread(target=self.process_video)
-        capture_thread.start()
-        processing_thread.start()
-
-        while corriendo:
-            for evento in pygame.event.get():
-                if evento.type == QUIT:
-                    corriendo = False
-                    self.shutdown_event.set()
-
-            frame_start_time = time.time()  # Inicio de procesamiento del frame actual
-            
-            pantalla.fill(color_fondo)
-
-            # Avanzar la simulación de Pymunk
-            self.space.step(1/48.0)
-
-            # Visualizar la simulación de Pymunk con ajustes personalizados
-            for ball_id, ball in self.balls.items():
-                # Dibuja solo el contorno de cada bola
-                pygame.draw.circle(pantalla, color_bola, (int(ball.body.position.x), int(ball.body.position.y)), ball.shape.radius, 1)
-
-            # Programar el post-step callback para procesar actualizaciones de bolas
-            # Hacerlo aquí asegura que se procesen después del próximo paso de simulación
-            self.space.add_post_step_callback(self.process_ball_updates, None)
-            
-            # Visualizar la simulación de Pymunk
-            self.space.debug_draw(draw_options)
-
-            # Cálculo de FPS y latencia (solo se actualiza cada segundo)
-            current_time = pygame.time.get_ticks()
-            if current_time - start_time > 1000:
-                fps = frame_count / ((current_time - start_time) / 1000.0)
-                latency = (time.time() - frame_start_time) * 1000  # Latencia en milisegundos
-                start_time = current_time
-                frame_count = 0
-
-            # Mostrar FPS y latencia constantemente
-            fps_text = font.render(f"FPS: {fps:.2f}", True, (0, 255, 0))
-            latency_text = font.render(f"Latency: {latency:.2f} ms", True, (0, 255, 0))
-            pantalla.blit(fps_text, (50, 50))
-            pantalla.blit(latency_text, (50, 90))
-
-            frame_count += 1
-
-            pygame.display.flip()  # Actualizar la pantalla
-            reloj.tick(48)  # 60 FPS
-
-        # Esperar a que los hilos de captura y procesamiento finalicen
-        capture_thread.join()
-        processing_thread.join()
-        pygame.quit()
-        cv2.destroyAllWindows()"""
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Traffic Flow Analysis with YOLO and ByteTrack")
@@ -832,4 +435,5 @@ if __name__ == "__main__":
                                port=args.port,
                                confidence_threshold=args.confidence_threshold,
                                iou_threshold=args.iou_threshold)
+
     processor.start()
