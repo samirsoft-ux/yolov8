@@ -557,3 +557,187 @@ def colision_trayectoria(self, frame, centro_suavizado, direccion_suavizada, cen
                 break
 
     return True, punto_colision_cercano if punto_colision_cercano else None
+
+
+
+    if punto_colision_cercano is not None and distancia_al_centro_bola <= umbral_proximidad:
+        velocidad_fija_bola = 1500
+        coeficiente_friccion = 0.9
+        trayectoria_actual = {'puntos': [(punto_inicio_trayectoria,)], 'rebotes': 0}
+        
+        punto_actual = punto_inicio_trayectoria
+        direccion_actual = vector_velocidad_bola / np.linalg.norm(vector_velocidad_bola)
+
+        while velocidad_fija_bola > 1.0:
+            punto_final_proyectado = punto_actual + direccion_actual * velocidad_fija_bola
+            punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_actual, punto_final_proyectado, self.mesa_corners)
+
+            if punto_colision_banda:
+                normal_banda = self.calcular_normal_banda(segmento_colision[0], segmento_colision[1])
+                direccion_actual = self.calcular_vector_reflexion(direccion_actual, normal_banda)
+                velocidad_fija_bola *= coeficiente_friccion
+                
+                # Aquí actualizamos la trayectoria actual con el nuevo punto de colisión y aumentamos el contador de rebotes
+                trayectoria_actual['puntos'].append(punto_colision_banda)
+                trayectoria_actual['rebotes'] += 1
+                
+                punto_actual = punto_colision_banda
+            else:
+                break
+        
+        # Guardamos la trayectoria actual
+        todas_las_trayectorias.append(trayectoria_actual)
+    
+    # Seleccionamos la trayectoria con más rebotes
+    trayectoria_con_mas_rebotes = max(todas_las_trayectorias, key=lambda x: x['rebotes'], default=None)
+    
+    # Dibujamos la trayectoria seleccionada
+    if trayectoria_con_mas_rebotes:
+        for i in range(len(trayectoria_con_mas_rebotes['puntos']) - 1):
+            cv2.line(frame, tuple(np.int32(trayectoria_con_mas_rebotes['puntos'][i])), tuple(np.int32(trayectoria_con_mas_rebotes['puntos'][i + 1])), (0, 255, 0), 2)
+            
+            
+            
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if punto_colision_cercano is not None:
+    # Verifica si el punto de colisión está suficientemente cerca del centro de la bola
+    umbral_proximidad = 5  # Ajusta este valor según sea necesario
+    distancia_al_centro_bola = np.linalg.norm(np.array(centro_bola) - np.array(punto_interseccion_int))
+    
+    if distancia_al_centro_bola <= umbral_proximidad:
+        # Calcular la dirección y velocidad de la bola post-impacto
+        vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada, punto_colision_cercano, centros_bolas[0])
+        
+        vector_al_centro = np.array(centro_bola) - np.array(punto_colision_cercano)
+        # Normalizar este vector
+        vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
+        # Calcular el punto inicial y final de la trayectoria proyectada
+        punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
+        
+        # Configuraciones iniciales para la simulación de rebotes
+        velocidad_fija_bola = 1500  # Velocidad inicial arbitraria
+        coeficiente_friccion = 0.9  # Factor de reducción de velocidad por rebote
+        
+        trayectoria_actual = {'puntos': [(punto_inicio_trayectoria,)], 'rebotes': 0}
+
+        
+        # Inicia la simulación de la trayectoria de la bola desde el punto de impacto
+        punto_actual = punto_inicio_trayectoria
+        direccion_actual = vector_velocidad_bola / np.linalg.norm(vector_velocidad_bola)
+
+        while velocidad_fija_bola > 1.0:
+            # Calcula el punto final proyectado
+            punto_final_proyectado = punto_actual + direccion_actual * velocidad_fija_bola
+
+            # Intenta detectar una colisión con las bandas de la mesa
+            punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_actual, punto_final_proyectado, self.mesa_corners)
+
+            if punto_colision_banda:
+                # Si detecta una colisión, calcula la normal de la banda
+                normal_banda = self.calcular_normal_banda(segmento_colision[0], segmento_colision[1])
+                                        
+                # Refleja la dirección de la trayectoria basándose en la normal de la banda
+                direccion_actual = self.calcular_vector_reflexion(direccion_actual, normal_banda)
+                
+                # Reduce la velocidad debido al rebote
+                velocidad_fija_bola *= coeficiente_friccion
+                
+                # Aquí actualizamos la trayectoria actual con el nuevo punto de colisión y aumentamos el contador de rebotes
+                trayectoria_actual['puntos'].append(punto_colision_banda)
+                trayectoria_actual['rebotes'] += 1
+
+                # Actualiza el punto actual para el siguiente cálculo
+                punto_actual = punto_colision_banda
+                
+            else:
+                break  # Termina el bucle
+            
+        # Guardamos la trayectoria actual
+        todas_las_trayectorias.append(trayectoria_actual)
+        
+    # Seleccionamos la trayectoria con más rebotes
+    trayectoria_con_mas_rebotes = max(todas_las_trayectorias, key=lambda x: x['rebotes'], default=None)
+    
+    # Dibujamos la trayectoria seleccionada
+    if trayectoria_con_mas_rebotes:
+        for i in range(len(trayectoria_con_mas_rebotes['puntos']) - 1):
+            cv2.line(frame, tuple(np.int32(trayectoria_con_mas_rebotes['puntos'][i])), tuple(np.int32(trayectoria_con_mas_rebotes['puntos'][i + 1])), (0, 255, 0), 2)
+    
+    return True, punto_colision_cercano
+else:
+    return False, None
+
+
+imprimiednio todas las trayectorias
+[{'puntos': [[604.6160955863497, 503.24922882462613], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+             [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195]], 'rebotes': 70}]
+imprimiednio la trayectoria mas grande
+{'puntos': [[604.6160955863497, 503.24922882462613], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], 
+            [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195], [395.3497546611093, 257.73567616356195]], 'rebotes': 70}
+imprimiednio todas las trayectorias
+[{'puntos': [[605.2338417337363, 503.3160568345733], [395.7040693381995, 257.7631497615182], [234.5888976078241, 396.1399125821547], [746.3510931665044, 961.1631600623798], [1444.3319795424482, 339.07387007147327], [1719.3827300722146, 673.6564058851276], [1375.1058500349477, 994.7864090927781], [1375.1058500349477, 994.786409092778], [1375.1058500349477, 994.786409092778]], 'rebotes': 8}]
+imprimiednio la trayectoria mas grande
+{'puntos': [[605.2338417337363, 503.3160568345733], [395.7040693381995, 257.7631497615182], [234.5888976078241, 396.1399125821547], [746.3510931665044, 961.1631600623798], [1444.3319795424482, 339.07387007147327], [1719.3827300722146, 673.6564058851276], [1375.1058500349477, 994.7864090927781], [1375.1058500349477, 994.786409092778], [1375.1058500349477, 994.786409092778]], 'rebotes': 8}

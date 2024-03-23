@@ -256,14 +256,32 @@ class VideoProcessor:
                 direccion_actual = vector_velocidad_bola / np.linalg.norm(vector_velocidad_bola)
 
                 # Mientras la "velocidad" de la bola no sea insignificante
-                while velocidad_fija_bola > 1.0 and rebotes_contador < 2:
+                while velocidad_fija_bola > 1.0 and rebotes_contador < 4:
                     # Calcula el punto final proyectado
                     punto_final_proyectado = punto_actual + direccion_actual * velocidad_fija_bola
 
+                    # Primero, verifica si hay colisión con otra bola en la trayectoria hacia el punto proyectado
+                    """punto_colision_otra_bola, direccion_nueva = self.detectar_colision_con_bolas(punto_actual, direccion_actual, centros_bolas, radio_bolas)
+                    if punto_colision_otra_bola is not None:
+                        # Aquí manejas la colisión detectada con otra bola
+                        # Por ejemplo, actualizando la dirección actual con la nueva dirección calculada
+                        direccion_actual = direccion_nueva
+                        # Puedes elegir romper el ciclo o ajustar el punto actual para la próxima iteración
+                        punto_actual = punto_colision_otra_bola
+                        # Si decides continuar con más lógica después de la colisión, asegúrate de ajustar la velocidad y la dirección adecuadamente
+                        velocidad_fija_bola *= coeficiente_friccion
+                        # Incrementar el contador de rebotes si es necesario
+                        rebotes_contador += 1
+                        # Para simplificar, podrías romper el ciclo después de manejar la primera colisión con otra bola
+                        break"""
+                    
                     # Intenta detectar una colisión con las bandas de la mesa
                     punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_actual, punto_final_proyectado, self.mesa_corners)
 
                     if punto_colision_banda:
+                        punto_interseccion_int2 = tuple(np.int32(punto_colision_banda))
+                        cv2.circle(frame, punto_interseccion_int2, 30, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+        
                         # Si detecta una colisión, calcula la normal de la banda
                         normal_banda = self.calcular_normal_banda(segmento_colision[0], segmento_colision[1])
                                                 
@@ -286,6 +304,24 @@ class VideoProcessor:
             return True, punto_colision_cercano
         else:
             return False, None
+    
+    def detectar_colision_con_bolas(self, punto_actual, direccion_actual, centros_bolas, radio_bolas):
+        for centro_bola in centros_bolas:
+            distancia_entre_centros = np.linalg.norm(punto_actual - centro_bola)
+            if distancia_entre_centros <= 2 * radio_bolas:  # Suponiendo que todas las bolas tienen el mismo radio
+                # Calcula el punto de colisión como el punto medio entre los centros en el momento del impacto
+                punto_colision = (punto_actual + centro_bola) / 2
+                
+                # La nueva dirección se puede calcular como la diferencia entre el punto actual y el centro de la bola golpeada,
+                # normalizada para que represente solo la dirección.
+                direccion_nueva = centro_bola - punto_actual
+                direccion_nueva_normalizada = direccion_nueva / np.linalg.norm(direccion_nueva)
+                
+                # Asegura devolver el punto de colisión y la nueva dirección normalizada
+                return punto_colision, direccion_nueva_normalizada
+
+        # Si no se detecta colisión con ninguna bola, devuelve None para ambos valores
+        return None, None
     
     def calcular_normal_banda(self, p0, p1):
         # Calcula el vector director del segmento de banda
