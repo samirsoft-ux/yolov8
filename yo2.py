@@ -124,3 +124,140 @@ if __name__ == "__main__":
                                iou_threshold=args.iou_threshold)
 
     processor.start()
+    
+    
+    def colision_trayectoria(self, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
+        punto_colision_cercano = None
+        distancia_minima = float('inf')
+        
+        radio_efectivo = radio_bolas + grosor_taco / 2
+        
+        for centro_bola in centros_bolas:
+            punto_mas_cercano, distancia_al_centro = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+            if distancia_al_centro <= radio_efectivo:
+                if distancia_al_centro < distancia_minima:
+                    distancia_minima = distancia_al_centro
+                    punto_colision_cercano = punto_mas_cercano
+
+        if punto_colision_cercano is not None:
+            return True, punto_colision_cercano
+        else:
+            return False, None
+    
+    def calcular_punto_mas_cercano_y_distancia(self, linea_inicio, direccion, punto):
+        direccion_norm = direccion / np.linalg.norm(direccion)
+        inicio_a_punto = punto - linea_inicio
+        t = np.dot(inicio_a_punto, direccion_norm)
+        punto_mas_cercano = linea_inicio + t * direccion_norm
+        distancia = np.linalg.norm(punto - punto_mas_cercano)
+        return punto_mas_cercano, distancia
+    
+    def handle_detections(self, frame, detections):
+        centros_bolas = []
+        if self.frame_actual < self.frames_para_calculo:
+            radios_bolas = []
+            for i, bbox in enumerate(detections.xyxy):
+                class_id = detections.class_id[i]
+                if class_id in [0, 1]:  # Suponiendo que 0 y 1 son IDs para las bolas
+                    x1, y1, x2, y2 = bbox
+                    radio = ((x2 - x1) + (y2 - y1)) / 4
+                    self.radios_acumulados.append(radio)
+            self.frame_actual += 1
+        if self.frame_actual == self.frames_para_calculo and self.radios_acumulados:
+            self.radio_promedio_bolas = sum(self.radios_acumulados) / len(self.radios_acumulados)
+            
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            if class_id in [0, 1]:  # Bolas
+                centro_bola_x = (bbox[0] + bbox[2]) / 2
+                centro_bola_y = (bbox[1] + bbox[3]) / 2
+                centros_bolas.append((centro_bola_x, centro_bola_y))
+        
+        for i, bbox in enumerate(detections.xyxy):
+            class_id = detections.class_id[i]
+            if class_id == 2:  # Taco
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+                    _, binary_roi = cv2.threshold(blurred_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    contornos, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contornos:
+                        contorno_taco = max(contornos, key=cv2.contourArea)
+                        rect = cv2.minAreaRect(contorno_taco)
+                        centro, (ancho, alto), angulo = rect
+                        if ancho < alto:
+                            angulo += 90
+                        grosor_taco = min(ancho, alto)  # Consideramos el menor de los lados como el grosor
+                        self.historial_lineas.append(((centro[0] + x1, centro[1] + y1), angulo))
+                        if len(self.historial_lineas) > self.max_historial:
+                            self.historial_lineas.pop(0)
+                        centro_suavizado, angulo_suavizado = self.suavizar_linea()
+                        if centro_suavizado is not None and angulo_suavizado is not None:
+                            direccion_suavizada = np.array([np.cos(np.deg2rad(angulo_suavizado)), np.sin(np.deg2rad(angulo_suavizado))])
+                            bola_primera_colision = None
+                            distancia_minima_colision = float('inf')
+                            for centro_bola in centros_bolas:
+                                punto_mas_cercano, distancia = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+                                if distancia < distancia_minima_colision:
+                                    distancia_minima_colision = distancia
+                                    bola_primera_colision = centro_bola
+                            
+                            if bola_primera_colision:
+                                colision, punto_colision = self.colision_trayectoria(centro_suavizado, direccion_suavizada, [bola_primera_colision], self.radio_promedio_bolas, grosor_taco)
+                                if colision:
+                                    cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_colision)), (0, 255, 0), 2)
+                                else:
+                                    direccion_opuesta = -direccion_suavizada
+                                    colision_opuesta, punto_colision_opuesto = self.colision_trayectoria(centro_suavizado, direccion_opuesta, [bola_primera_colision], self.radio_promedio_bolas, grosor_taco)
+                                    if colision_opuesta:
+                                        cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_colision_opuesto)), (0, 255, 0), 2)                                        
+                                    else:
+                                        longitud_linea = max(frame.shape) * 2
+                                        punto_final_original = centro_suavizado + direccion_suavizada * longitud_linea
+                                        cv2.line(frame, tuple(np.int32(centro_suavizado)), tuple(np.int32(punto_final_original)), (0, 255, 0), 2)
+                            
+                else:
+                    print("ROI vacío o de tamaño inválido.")
+        return frame
+    
+    
+    
+ya el problema está aca y es que este cálculo contempla varios puntos representados por circulos amarillos y cuando hay varias bolas en la trayectoria del taco y por ende varios circulos amarillos están chocando con varias bolas a veces toma la más cercana a veces la más lejana a veces la del medio, en conclusión creo que en este punto es donde se necesita diferenciar y seleccionar sola la bola más cercana al punto de incio de la trayectoria del taco
+ChatGPT
+Para asegurarte de que siempre se seleccione la bola más cercana al punto de inicio de la trayectoria del taco, necesitas un enfoque que te permita no solo encontrar el punto más cercano a lo largo de la trayectoria para cada bola, sino también evaluar qué bola se encuentra efectivamente más cerca en términos de la distancia a lo largo de esa trayectoria desde el punto de inicio del taco. Esto implica dos pasos principales:
+
+Calcular el punto más cercano en la trayectoria para cada bola, como ya estás haciendo.
+Determinar cuál de estos puntos está efectivamente más cerca del punto de inicio de la trayectoria del taco en términos de distancia a lo largo de esa trayectoria.
+Mejora en el Proceso de Selección
+Para implementar esto, puedes modificar el proceso de selección en tu método handle_detections para incluir no solo la distancia del centro de la bola al punto más cercano en la trayectoria, sino también la distancia a lo largo de la trayectoria desde el punto de inicio del taco hasta ese punto más cercano. Esto te permitirá identificar y seleccionar consistentemente la bola que está efectivamente más cerca del inicio de la trayectoria del taco.
+
+Aquí te muestro cómo podrías ajustar tu código para lograr esto:
+
+python
+Copy code
+def handle_detections(self, frame, detections):
+    # Tus cálculos previos para establecer centro_suavizado, angulo_suavizado, etc.
+    ...
+    bola_primera_colision = None
+    distancia_minima_al_inicio = float('inf')  # Nuevo criterio basado en la distancia al inicio
+
+    for centro_bola in centros_bolas:
+        punto_mas_cercano, distancia_al_centro = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+        # Calcula la distancia desde el punto de inicio de la trayectoria hasta el punto más cercano
+        distancia_al_inicio = np.linalg.norm(punto_mas_cercano - centro_suavizado)
+        
+        if distancia_al_centro <= radio_efectivo:
+            # Verifica si esta bola está más cerca del inicio de la trayectoria comparado con las anteriores
+            if distancia_al_inicio < distancia_minima_al_inicio:
+                distancia_minima_al_inicio = distancia_al_inicio
+                bola_primera_colision = centro_bola
+
+    # El resto de tu lógica para manejar la colisión
+    ...
+Explicación del Cambio
+Distancia al Inicio de la Trayectoria: Al introducir distancia_al_inicio como criterio, te estás asegurando de que la selección de la bola para la colisión se base en qué bola se encuentra más cerca del punto de inicio del movimiento del taco, no solo en términos de proximidad perpendicular a la trayectoria, sino realmente en términos de quién sería golpeada primero según la dirección del taco.
+Este enfoque te ayudará a solucionar el problema de inconsistencias al seleccionar la bola con la que colisiona cuando hay múltiples bolas cerca de la trayectoria del taco. Al centrarte en la distancia a lo largo de la trayectoria desde el punto de inicio, deberías poder identificar de manera más confiable y coherente cuál es la primera bola que el taco golpearía.
