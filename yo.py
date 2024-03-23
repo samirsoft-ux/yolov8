@@ -204,7 +204,6 @@ class VideoProcessor:
     def colision_trayectoria(self, frame, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
         punto_colision_cercano = None
         distancia_minima = float('inf')
-        
         # Ajusta el radio de las bolas para considerar el grosor del taco
         radio_efectivo = radio_bolas + grosor_taco / 2
         
@@ -245,42 +244,74 @@ class VideoProcessor:
                 vector_al_centro = np.array(centro_bola) - np.array(punto_colision_cercano)
                 # Normalizar este vector
                 vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
-                # Calcular el punto de inicio de la trayectoria en el lado opuesto
+                # Calcular el punto inicial y final de la trayectoria proyectada
                 punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
+                longitud_trayectoria = 1000  # Definir longitud proyectada de la trayectoria
+                punto_final_trayectoria_proyectado = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
+
                 
-                # Dibujar la trayectoria de la bola post-impacto desde el punto opuesto
-                longitud_trayectoria = 1000  # Define qué tan largo quieres que sea el trazo de la trayectoria
-                punto_final_trayectoria = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
+                # Detectar colisión con las bandas
+                punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_inicio_trayectoria, punto_final_trayectoria_proyectado, self.mesa_corners)
+
+                if punto_colision_banda:
+                    # Si hay colisión, ajustar el punto final de la trayectoria al punto de colisión
+                    punto_final_trayectoria = punto_colision_banda
+                    # Visualización del punto de intersección en el frame
+                    punto_interseccion_int_2 = tuple(np.int32(punto_colision_banda))
+                    cv2.circle(frame, punto_interseccion_int_2, 30, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+
+                    # Opcional: Calcular la nueva dirección de la bola post-colisión (reflejar vector_velocidad_bola)
+                    # Este paso requiere calcular la normal del segmento de banda con el que colisiona
+                    # y usarla para calcular el vector de reflexión (rebote)
+                    #normal_banda = self.calcular_normal_banda(segmento_colision)
+                    #vector_reflexion = self.calcular_vector_reflexion(vector_velocidad_bola, normal_banda)
+                    # Aquí puedes decidir cómo actualizar vector_velocidad_bola basado en vector_reflexion para futuras simulaciones
+                else:
+                    # Si no hay colisión, el punto final de la trayectoria se mantiene como fue calculado originalmente
+                    punto_final_trayectoria = punto_final_trayectoria_proyectado
+
+                # Dibujar la trayectoria de la bola post-impacto
                 cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
             
             return True, punto_colision_cercano
         else:
             return False, None
-    
-    def es_impacto_central(self, punto_colision_cercano, centro_bola, radio_bola, umbral_centralidad=0.8):
-        """
-        Determina si el punto de colisión está suficientemente cerca del centro de la bola.
-        
-        :param punto_colision_cercano: Coordenadas del punto de colisión.
-        :param centro_bola: Coordenadas del centro de la bola.
-        :param radio_bola: Radio de la bola.
-        :param umbral_centralidad: Umbral para considerar el impacto como central, relativo al radio.
-        :return: True si el impacto es central, False en caso contrario.
-        """
-        distancia_centro_impacto = np.linalg.norm(punto_colision_cercano - centro_bola)
-        return distancia_centro_impacto <= radio_bola * umbral_centralidad
-    
-    """def calcular_vector_velocidad_bola_post_impacto(self, direccion_taco):
-        # Definir una velocidad fija para la bola después del impacto
-        velocidad_fija_bola = 2.0  # Esta es una velocidad fija arbitraria
+     
+    def detectar_colision_trayectoria_con_banda(self, punto_inicio_trayectoria, punto_final_trayectoria, mesa_corners):
+        for i in range(len(mesa_corners)):
+            p0 = mesa_corners[i]
+            p1 = mesa_corners[(i + 1) % len(mesa_corners)]  # Asegura que el último punto se conecte con el primero
 
-        # Normalizar la dirección del taco para usarla como la dirección de la bola
-        direccion_norm = direccion_taco / np.linalg.norm(direccion_taco)
-        
-        # Calcular el vector de velocidad de la bola post-impacto
-        vector_velocidad_bola_post_impacto = (direccion_norm * velocidad_fija_bola) * (-1)
-        
-        return vector_velocidad_bola_post_impacto"""
+            punto_interseccion = self.calcular_interseccion(punto_inicio_trayectoria, punto_final_trayectoria, p0, p1)
+            if punto_interseccion:
+                return punto_interseccion, (p0, p1)  # Retorna el punto de intersección y el segmento de banda con el que intersecta
+
+        return None, None  # No hubo colisión con bandas
+    
+    def calcular_interseccion(self, p0, p1, p2, p3):
+        """
+        Calcula el punto de intersección entre dos segmentos de línea definidos por los puntos p0, p1 y p2, p3.
+        Retorna el punto de intersección como (x, y) o None si no hay intersección.
+        """
+        s1_x = p1[0] - p0[0]
+        s1_y = p1[1] - p0[1]
+        s2_x = p3[0] - p2[0]
+        s2_y = p3[1] - p2[1]
+
+        denom = s1_x * s2_y - s2_x * s1_y
+        if denom == 0:
+            return None  # Las líneas son paralelas o coincidentes
+
+        s = (-s1_y * (p0[0] - p2[0]) + s1_x * (p0[1] - p2[1])) / denom
+        t = ( s2_x * (p0[1] - p2[1]) - s2_y * (p0[0] - p2[0])) / denom
+
+        if 0 <= s <= 1 and 0 <= t <= 1:  # Si s y t están entre 0 y 1, hay intersección
+            # El punto de intersección está dentro de los segmentos de línea
+            interseccion_x = p0[0] + (t * s1_x)
+            interseccion_y = p0[1] + (t * s1_y)
+            return (interseccion_x, interseccion_y)
+
+        return None  # No hay intersección dentro de los segmentos de línea
         
     def calcular_vector_velocidad_bola_post_impacto(self, direccion_taco, punto_impacto, centro_bola):
         # Definir una velocidad fija para la bola después del impacto

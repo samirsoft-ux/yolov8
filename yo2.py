@@ -261,3 +261,255 @@ def handle_detections(self, frame, detections):
 Explicación del Cambio
 Distancia al Inicio de la Trayectoria: Al introducir distancia_al_inicio como criterio, te estás asegurando de que la selección de la bola para la colisión se base en qué bola se encuentra más cerca del punto de inicio del movimiento del taco, no solo en términos de proximidad perpendicular a la trayectoria, sino realmente en términos de quién sería golpeada primero según la dirección del taco.
 Este enfoque te ayudará a solucionar el problema de inconsistencias al seleccionar la bola con la que colisiona cuando hay múltiples bolas cerca de la trayectoria del taco. Al centrarte en la distancia a lo largo de la trayectoria desde el punto de inicio, deberías poder identificar de manera más confiable y coherente cuál es la primera bola que el taco golpearía.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if punto_colision_cercano is not None:
+    # Verifica si el punto de colisión está suficientemente cerca del centro de la bola
+    umbral_proximidad = 5  # Ajusta este valor según sea necesario
+    distancia_al_centro_bola = np.linalg.norm(np.array(centro_bola) - np.array(punto_interseccion_int))
+    
+    if distancia_al_centro_bola <= umbral_proximidad:
+        # Calcular la dirección y velocidad de la bola post-impacto
+        vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada, punto_colision_cercano, centros_bolas[0])
+        
+        # Calcular el punto opuesto al punto de colisión, a través del centro de la bola
+        # Esto crea un vector desde el punto de colisión hacia el centro de la bola
+        vector_al_centro = np.array(centro_bola) - np.array(punto_colision_cercano)
+        # Normalizar este vector
+        vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
+        # Calcular el punto de inicio de la trayectoria en el lado opuesto
+        punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
+        
+        # Dibujar la trayectoria de la bola post-impacto desde el punto opuesto
+        longitud_trayectoria = 1000  # Define qué tan largo quieres que sea el trazo de la trayectoria
+        punto_final_trayectoria = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
+        cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
+    
+    return True, punto_colision_cercano
+else:
+    return False, None
+
+
+for segmento in segmentos_banda:
+    cv2.line(frame, tuple(np.int32(segmento[0])), tuple(np.int32(segmento[1])), (255, 0, 0), 20)  # Bandas en rojo
+    punto_interseccion = self.calcular_interseccion(punto_inicio_trayectoria, punto_final_trayectoria, segmento[0], segmento[1])
+    #print(segmento[0])
+    #print(segmento[1])
+    if punto_interseccion:
+        # Si hay intersección, ajustar punto_final_trayectoria al punto de intersección
+        #punto_final_trayectoria = punto_interseccion
+        
+        # Visualización del punto de intersección en el frame
+        punto_interseccion_int = tuple(np.int32(punto_interseccion))
+        cv2.circle(frame, punto_interseccion_int, 30, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+
+        break  # Salir del bucle después de encontrar la primera intersección
+
+cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
+                
+                
+def colision_trayectoria(self, frame, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
+        punto_colision_cercano = None
+        distancia_minima = float('inf')
+        
+        # Ajusta el radio de las bolas para considerar el grosor del taco
+        radio_efectivo = radio_bolas + grosor_taco / 2
+        
+        for centro_bola in centros_bolas:
+            # Calcula el punto en la trayectoria del taco más cercano al centro de la bola
+            punto_mas_cercano, distancia_al_centro = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+            
+            if distancia_al_centro <= radio_efectivo:
+                # Verifica si este es el punto de colisión más cercano encontrado hasta ahora
+                if distancia_al_centro < distancia_minima:
+                    distancia_minima = distancia_al_centro
+                    # Aquí, en lugar de simplemente seleccionar el punto_mas_cercano,
+                    punto_interseccion_int = tuple(np.int32(punto_mas_cercano))
+                    
+                    ##PRUEBA PARA VER EL PUNTO DE CHOQUE PERO DE LA LINEA PERPENDICULAR
+                    #cv2.circle(frame, punto_interseccion_int, 20, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+        
+                    # utilizamos la función encontrar_punto_interseccion para obtener una posición de colisión más precisa.
+                    punto_interseccion_exacto = self.encontrar_punto_interseccion(frame, centro_suavizado, direccion_suavizada, centro_bola, radio_bolas)
+                    
+                    # Es posible que punto_interseccion_exacto sea None si no hay intersección real debido al discriminante negativo.
+                    if punto_interseccion_exacto is not None:
+                        punto_colision_cercano = punto_interseccion_exacto
+                        # Actualiza la distancia mínima con la distancia al punto de intersección exacto
+                        distancia_minima = np.linalg.norm(centro_suavizado - punto_interseccion_exacto)
+
+        if punto_colision_cercano is not None:
+            # Verifica si el punto de colisión está suficientemente cerca del centro de la bola
+            umbral_proximidad = 5  # Ajusta este valor según sea necesario
+            distancia_al_centro_bola = np.linalg.norm(np.array(centro_bola) - np.array(punto_interseccion_int))
+            
+            if distancia_al_centro_bola <= umbral_proximidad:
+                # Calcular la dirección y velocidad de la bola post-impacto
+                vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada, punto_colision_cercano, centros_bolas[0])
+                
+                # Calcular el punto opuesto al punto de colisión, a través del centro de la bola
+                # Esto crea un vector desde el punto de colisión hacia el centro de la bola
+                vector_al_centro = np.array(centro_bola) - np.array(punto_colision_cercano)
+                # Normalizar este vector
+                vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
+                # Calcular el punto de inicio de la trayectoria en el lado opuesto
+                punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
+                
+                # Dibujar la trayectoria de la bola post-impacto desde el punto opuesto
+                longitud_trayectoria = 1000  # Define qué tan largo quieres que sea el trazo de la trayectoria
+                # Suponiendo que tienes una lista de segmentos de banda
+                segmentos_banda = self.generar_segmentos_banda()
+                for segmento in segmentos_banda:
+                    print("Segmento de banda:", segmento[0], "a", segmento[1])
+                punto_final_trayectoria = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
+                
+                # Verificar la intersección con cada segmento de banda
+                for segmento in segmentos_banda:
+                    cv2.line(frame, tuple(np.int32(segmento[0])), tuple(np.int32(segmento[1])), (255, 0, 0), 20)  # Bandas en rojo
+                    cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 0, 255), 2)  # Trayectoria en azul
+                    punto_interseccion = self.calcular_interseccion(punto_inicio_trayectoria, punto_final_trayectoria, segmento[0], segmento[1])
+                    #print(segmento[0])
+                    #print(segmento[1])
+                    if punto_interseccion:
+                        # Si hay intersección, ajustar punto_final_trayectoria al punto de intersección
+                        #punto_final_trayectoria = punto_interseccion
+                        
+                        # Visualización del punto de intersección en el frame
+                        punto_interseccion_int = tuple(np.int32(punto_interseccion))
+                        cv2.circle(frame, punto_interseccion_int, 30, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+        
+                        break  # Salir del bucle después de encontrar la primera intersección
+                
+                cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
+            
+            return True, punto_colision_cercano
+        else:
+            return False, None
+        
+        
+        
+def colision_trayectoria(self, frame, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
+        punto_colision_cercano = None
+        distancia_minima = float('inf')
+        
+        # Ajusta el radio de las bolas para considerar el grosor del taco
+        radio_efectivo = radio_bolas + grosor_taco / 2
+        
+        for centro_bola in centros_bolas:
+            # Calcula el punto en la trayectoria del taco más cercano al centro de la bola
+            punto_mas_cercano, distancia_al_centro = self.calcular_punto_mas_cercano_y_distancia(centro_suavizado, direccion_suavizada, centro_bola)
+            
+            if distancia_al_centro <= radio_efectivo:
+                # Verifica si este es el punto de colisión más cercano encontrado hasta ahora
+                if distancia_al_centro < distancia_minima:
+                    distancia_minima = distancia_al_centro
+                    # Aquí, en lugar de simplemente seleccionar el punto_mas_cercano,
+                    punto_interseccion_int = tuple(np.int32(punto_mas_cercano))
+                    
+                    ##PRUEBA PARA VER EL PUNTO DE CHOQUE PERO DE LA LINEA PERPENDICULAR
+                    #cv2.circle(frame, punto_interseccion_int, 20, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+        
+                    # utilizamos la función encontrar_punto_interseccion para obtener una posición de colisión más precisa.
+                    punto_interseccion_exacto = self.encontrar_punto_interseccion(frame, centro_suavizado, direccion_suavizada, centro_bola, radio_bolas)
+                    
+                    # Es posible que punto_interseccion_exacto sea None si no hay intersección real debido al discriminante negativo.
+                    if punto_interseccion_exacto is not None:
+                        punto_colision_cercano = punto_interseccion_exacto
+                        # Actualiza la distancia mínima con la distancia al punto de intersección exacto
+                        distancia_minima = np.linalg.norm(centro_suavizado - punto_interseccion_exacto)
+
+        if punto_colision_cercano is not None:
+            # Verifica si el punto de colisión está suficientemente cerca del centro de la bola
+            umbral_proximidad = 5  # Ajusta este valor según sea necesario
+            distancia_al_centro_bola = np.linalg.norm(np.array(centro_bola) - np.array(punto_interseccion_int))
+            segmentos_banda = self.generar_segmentos_banda()
+            intersecciones_potenciales = []
+            if distancia_al_centro_bola <= umbral_proximidad:
+                # Calcular la dirección y velocidad de la bola post-impacto
+                vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada, punto_colision_cercano, centros_bolas[0])
+                
+                # Calcular el punto opuesto al punto de colisión, a través del centro de la bola
+                # Esto crea un vector desde el punto de colisión hacia el centro de la bola
+                vector_al_centro = np.array(centro_bola) - np.array(punto_colision_cercano)
+                # Normalizar este vector
+                vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
+                # Calcular el punto de inicio de la trayectoria en el lado opuesto
+                punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
+                
+                # Dibujar la trayectoria de la bola post-impacto desde el punto opuesto
+                longitud_trayectoria = 1000  # Define qué tan largo quieres que sea el trazo de la trayectoria
+                # Suponiendo que tienes una lista de segmentos de banda
+                
+                for segmento in segmentos_banda:
+                    print("Segmento de banda:", segmento[0], "a", segmento[1])
+                punto_final_trayectoria = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
+                
+                for segmento in segmentos_banda:
+                    cv2.line(frame, tuple(np.int32(segmento[0])), tuple(np.int32(segmento[1])), (255, 0, 0), 20)  # Bandas en rojo
+                    #cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 0, 255), 2)  # Trayectoria en azul
+                    punto_interseccion = self.calcular_interseccion(punto_inicio_trayectoria, punto_final_trayectoria, segmento[0], segmento[1])
+                    if punto_interseccion:
+                        cv2.circle(frame, tuple(np.int32(punto_interseccion)), 10, (0, 255, 255), -1)
+                        distancia = np.linalg.norm(punto_inicio_trayectoria - np.array(punto_interseccion))
+                        intersecciones_potenciales.append((punto_interseccion, distancia))
+
+                # Evalúa las intersecciones potenciales para encontrar la mejor candidata
+                if intersecciones_potenciales:
+                    # Selecciona la intersección más cercana (o cualquier otro criterio que prefieras)
+                    interseccion_seleccionada = min(intersecciones_potenciales, key=lambda x: x[1])
+                    punto_final_trayectoria = interseccion_seleccionada[0]
+
+                # Dibuja la trayectoria ajustada de la bola hasta el punto seleccionado
+                cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
+            
+            return True, punto_colision_cercano
+        else:
+            return False, None
+    
+    #### CALCULOS DE LA BOLA QUE HA CHOCADO EL TACO CON ALGUNA BANDA 
+    def generar_segmentos_banda(self):
+        # Asumiendo que mesa_corners ya está ordenada y contiene 4 esquinas
+        segmentos = []
+        for i in range(len(self.mesa_corners)):
+            punto_inicio = self.mesa_corners[i]
+            # El operador % len(self.mesa_corners) asegura que el índice vuelve a 0 después de alcanzar el último punto
+            punto_final = self.mesa_corners[(i + 1) % len(self.mesa_corners)]
+            segmentos.append((punto_inicio, punto_final))
+        return segmentos
+    
+    def calcular_interseccion(self, p1, p2, p3, p4):
+        # Convertir puntos a 'numpy.array' para facilitar los cálculos
+        p1 = np.array(p1); p2 = np.array(p2)
+        p3 = np.array(p3); p4 = np.array(p4)
+        
+        # Calcular partes del sistema de ecuaciones para encontrar el punto de intersección
+        s = np.vstack([p1, p2, p3, p4])  # Pila vertical de puntos
+        h = np.hstack((s, np.ones((4, 1))))  # Añadir una columna de unos
+        l1 = np.cross(h[0], h[1])  # Encontrar los vectores perpendiculares a los puntos
+        l2 = np.cross(h[2], h[3])  
+        x, y, z = np.cross(l1, l2)  # El punto de intersección es perpendicular a ambos vectores perpendiculares
+        
+        if z == 0:  # Si z es 0, las líneas son paralelas o coincidentes
+            return None
+        return (x/z, y/z)
