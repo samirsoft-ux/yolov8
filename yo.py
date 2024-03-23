@@ -200,7 +200,6 @@ class VideoProcessor:
     ##"""
     
     #CALCULAR EL CHOQUE DEL TACO CON UNA BOLA
-    
     def colision_trayectoria(self, frame, centro_suavizado, direccion_suavizada, centros_bolas, radio_bolas, grosor_taco):
         punto_colision_cercano = None
         distancia_minima = float('inf')
@@ -246,36 +245,65 @@ class VideoProcessor:
                 vector_al_centro_normalizado = vector_al_centro / np.linalg.norm(vector_al_centro)
                 # Calcular el punto inicial y final de la trayectoria proyectada
                 punto_inicio_trayectoria = np.array(centro_bola) + vector_al_centro_normalizado * radio_bolas
-                longitud_trayectoria = 1000  # Definir longitud proyectada de la trayectoria
-                punto_final_trayectoria_proyectado = punto_inicio_trayectoria + vector_velocidad_bola * longitud_trayectoria
-
                 
-                # Detectar colisión con las bandas
-                punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_inicio_trayectoria, punto_final_trayectoria_proyectado, self.mesa_corners)
+                # Configuraciones iniciales para la simulación de rebotes
+                velocidad_fija_bola = 1500  # Velocidad inicial arbitraria
+                coeficiente_friccion = 0.9  # Factor de reducción de velocidad por rebote
+                rebotes_contador = 0  # Contador de rebotes
+                
+                # Inicia la simulación de la trayectoria de la bola desde el punto de impacto
+                punto_actual = punto_inicio_trayectoria
+                direccion_actual = vector_velocidad_bola / np.linalg.norm(vector_velocidad_bola)
 
-                if punto_colision_banda:
-                    # Si hay colisión, ajustar el punto final de la trayectoria al punto de colisión
-                    punto_final_trayectoria = punto_colision_banda
-                    # Visualización del punto de intersección en el frame
-                    punto_interseccion_int_2 = tuple(np.int32(punto_colision_banda))
-                    cv2.circle(frame, punto_interseccion_int_2, 30, (0, 255, 255), -1)  # Dibuja un círculo amarillo
+                # Mientras la "velocidad" de la bola no sea insignificante
+                while velocidad_fija_bola > 1.0 and rebotes_contador < 2:
+                    # Calcula el punto final proyectado
+                    punto_final_proyectado = punto_actual + direccion_actual * velocidad_fija_bola
 
-                    # Opcional: Calcular la nueva dirección de la bola post-colisión (reflejar vector_velocidad_bola)
-                    # Este paso requiere calcular la normal del segmento de banda con el que colisiona
-                    # y usarla para calcular el vector de reflexión (rebote)
-                    #normal_banda = self.calcular_normal_banda(segmento_colision)
-                    #vector_reflexion = self.calcular_vector_reflexion(vector_velocidad_bola, normal_banda)
-                    # Aquí puedes decidir cómo actualizar vector_velocidad_bola basado en vector_reflexion para futuras simulaciones
-                else:
-                    # Si no hay colisión, el punto final de la trayectoria se mantiene como fue calculado originalmente
-                    punto_final_trayectoria = punto_final_trayectoria_proyectado
+                    # Intenta detectar una colisión con las bandas de la mesa
+                    punto_colision_banda, segmento_colision = self.detectar_colision_trayectoria_con_banda(punto_actual, punto_final_proyectado, self.mesa_corners)
 
-                # Dibujar la trayectoria de la bola post-impacto
-                cv2.line(frame, tuple(np.int32(punto_inicio_trayectoria)), tuple(np.int32(punto_final_trayectoria)), (0, 255, 0), 2)
+                    if punto_colision_banda:
+                        # Si detecta una colisión, calcula la normal de la banda
+                        normal_banda = self.calcular_normal_banda(segmento_colision[0], segmento_colision[1])
+                                                
+                        # Refleja la dirección de la trayectoria basándose en la normal de la banda
+                        direccion_actual = self.calcular_vector_reflexion(direccion_actual, normal_banda)
+                        
+                        # Reduce la velocidad debido al rebote
+                        velocidad_fija_bola *= coeficiente_friccion
+                        
+                        # Dibuja la trayectoria desde el punto actual hasta el punto de colisión
+                        cv2.line(frame, tuple(np.int32(punto_actual)), tuple(np.int32(punto_colision_banda)), (0, 255, 0), 2)
+
+                        # Actualiza el punto actual para el siguiente cálculo
+                        punto_actual = punto_colision_banda
+                        
+                        rebotes_contador += 1  # Incrementa el contador de rebotes
+                    else:
+                        break  # Termina el bucle
             
             return True, punto_colision_cercano
         else:
             return False, None
+    
+    def calcular_normal_banda(self, p0, p1):
+        # Calcula el vector director del segmento de banda
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        # Calcula el vector normal (perpendicular)
+        normal = np.array([-dy, dx])
+        # Normaliza el vector normal
+        norma = np.linalg.norm(normal)
+        if norma == 0:
+            return None  # Evita la división por cero
+        normal_normalizada = normal / norma
+        return normal_normalizada
+    
+    def calcular_vector_reflexion(self, vector_incidencia, normal_banda):
+        # Calcula el vector de reflexión
+        reflejo = vector_incidencia - 2 * np.dot(vector_incidencia, normal_banda) * normal_banda
+        return reflejo
      
     def detectar_colision_trayectoria_con_banda(self, punto_inicio_trayectoria, punto_final_trayectoria, mesa_corners):
         for i in range(len(mesa_corners)):
@@ -288,11 +316,12 @@ class VideoProcessor:
 
         return None, None  # No hubo colisión con bandas
     
+    
     def calcular_interseccion(self, p0, p1, p2, p3):
-        """
-        Calcula el punto de intersección entre dos segmentos de línea definidos por los puntos p0, p1 y p2, p3.
-        Retorna el punto de intersección como (x, y) o None si no hay intersección.
-        """
+        
+        #Calcula el punto de intersección entre dos segmentos de línea definidos por los puntos p0, p1 y p2, p3.
+        #Retorna el punto de intersección como (x, y) o None si no hay intersección.
+        
         s1_x = p1[0] - p0[0]
         s1_y = p1[1] - p0[1]
         s2_x = p3[0] - p2[0]
