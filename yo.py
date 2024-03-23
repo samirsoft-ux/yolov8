@@ -238,7 +238,7 @@ class VideoProcessor:
             
             if distancia_al_centro_bola <= umbral_proximidad:
                 # Calcular la dirección y velocidad de la bola post-impacto
-                vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada)
+                vector_velocidad_bola = self.calcular_vector_velocidad_bola_post_impacto(direccion_suavizada, punto_colision_cercano, centros_bolas[0])
                 
                 # Calcular el punto opuesto al punto de colisión, a través del centro de la bola
                 # Esto crea un vector desde el punto de colisión hacia el centro de la bola
@@ -270,7 +270,7 @@ class VideoProcessor:
         distancia_centro_impacto = np.linalg.norm(punto_colision_cercano - centro_bola)
         return distancia_centro_impacto <= radio_bola * umbral_centralidad
     
-    def calcular_vector_velocidad_bola_post_impacto(self, direccion_taco):
+    """def calcular_vector_velocidad_bola_post_impacto(self, direccion_taco):
         # Definir una velocidad fija para la bola después del impacto
         velocidad_fija_bola = 2.0  # Esta es una velocidad fija arbitraria
 
@@ -280,6 +280,29 @@ class VideoProcessor:
         # Calcular el vector de velocidad de la bola post-impacto
         vector_velocidad_bola_post_impacto = (direccion_norm * velocidad_fija_bola) * (-1)
         
+        return vector_velocidad_bola_post_impacto"""
+        
+    def calcular_vector_velocidad_bola_post_impacto(self, direccion_taco, punto_impacto, centro_bola):
+        # Definir una velocidad fija para la bola después del impacto
+        velocidad_fija_bola = 2.0  # Esta es una velocidad fija arbitraria
+        
+        # Normalizar la dirección del taco para usarla como la dirección de la bola
+        direccion_norm = direccion_taco / np.linalg.norm(direccion_taco)
+        
+        # Determinar si el impacto es por arriba o por debajo de la bola
+        vector_impacto = np.array(punto_impacto) - np.array(centro_bola)
+        vector_impacto_norm = vector_impacto / np.linalg.norm(vector_impacto)
+        
+        # Determinar la orientación del impacto comparando los vectores
+        # Esta condición es un ejemplo genérico y debe ser ajustada a tu lógica específica
+        es_impacto_inferior = np.dot(vector_impacto_norm, direccion_norm) > 0
+        
+        # Invertir la dirección si el impacto es por debajo de la bola
+        if es_impacto_inferior:
+            vector_velocidad_bola_post_impacto = (direccion_norm * velocidad_fija_bola) * (-1)
+        else:
+            vector_velocidad_bola_post_impacto = direccion_norm * velocidad_fija_bola
+            
         return vector_velocidad_bola_post_impacto
     
     def encontrar_punto_interseccion(self, frame, centro_suavizado, direccion_suavizada, centro_bola, radio_bola):
