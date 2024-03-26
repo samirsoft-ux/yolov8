@@ -236,7 +236,7 @@ class VideoProcessor:
 
         return centros_bolas
     
-    def recomendar_tiro(self, frame, detections, mesa_corners):
+    """def recomendar_tiro(self, frame, detections, mesa_corners):
         if self.radio_bolas_promedio is None:
             self.calcular_radio_promedio(detections)
         
@@ -303,8 +303,114 @@ class VideoProcessor:
             else:
                 # Trayectoria obstruida, dibuja en rojo para el debug
                 cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 0, 255), 2)
+        return frame"""
+
+    def recomendar_tiro(self, frame, detections, mesa_corners):
+        if self.radio_bolas_promedio is None:
+            self.calcular_radio_promedio(detections)
+        
+        if self.radio_bolas_promedio is None:
+            print("El radio promedio de las bolas aún no ha sido calculado.")
+            return frame
+        
+        centros_bolas = self.extraer_centros_bolas(detections)
+        centro_bola_blanca = None
+        # Encuentra el centro de la bola blanca
+        for tracker_id, class_id, centro_bola in centros_bolas:
+            if class_id == 0:
+                centro_bola_blanca = centro_bola
+                break
+        
+        if centro_bola_blanca is None:
+            print("Bola blanca no encontrada.")
+            return frame
+        
+        angulos_y_trayectorias = []
+        # Trayectorias hacia las demás bolas
+        for tracker_id, class_id, centro_bola in centros_bolas:
+            if class_id == 0:
+                continue  # Omitir la bola blanca
+            
+            # Luego, dentro de tu lógica de recomendación de tiro, reemplaza el cálculo de la buchaca más cercana
+            buchacas = self.encontrar_buchacas(mesa_corners)  # Obtiene todas las ubicaciones de las buchacas
+            
+            distancia_minima = np.inf        
+            
+            buchaca_cercana = None
+            # Itera sobre todas las buchacas para encontrar la más cercana
+            for buchaca in buchacas:
+                distancia = np.linalg.norm(centro_bola - buchaca)
+                if distancia < distancia_minima:
+                    distancia_minima = distancia
+                    buchaca_cercana = buchaca
+
+            # Calcula la dirección hacia la buchaca más cercana
+            direccion_hacia_buchaca = (buchaca_cercana - centro_bola) / np.linalg.norm(buchaca_cercana - centro_bola)
+            # Calcula los puntos objetivo
+            punto_objetivo = centro_bola - direccion_hacia_buchaca * (self.radio_bolas_promedio * 2)
+            punto_objetivo2 = centro_bola - direccion_hacia_buchaca * self.radio_bolas_promedio
+            # Dibuja un círculo en el punto_objetivo como visualización
+            cv2.circle(frame, (int(punto_objetivo[0]), int(punto_objetivo[1])), 5, (255, 0, 0), -1)
+            cv2.circle(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), 5, (255, 0, 0), -1)
+            
+            
+            # Verifica las trayectorias sin dibujarlas aún
+            trayectoria1_despejada = self.trayectoria_despejada(frame, punto_objetivo2, punto_objetivo, [cb[2] for cb in centros_bolas if cb[0] != tracker_id])
+            trayectoria2_despejada = self.trayectoria_despejada(frame, centro_bola_blanca, punto_objetivo, [cb[2] for cb in centros_bolas if cb[0] != tracker_id])
+            trayectoria3_despejada = self.trayectoria_despejada(frame, centro_bola, buchaca_cercana, [cb[2] for cb in centros_bolas if cb[0] != tracker_id])
+            
+            # Solo si las tres trayectorias están despejadas, calcula el ángulo y decide si dibujar
+            if trayectoria1_despejada and trayectoria2_despejada and trayectoria3_despejada:
+                if class_id != 0:  # Asegura no calcular ángulos para la bola blanca
+                    vector_trayectoria1 = punto_objetivo2 - punto_objetivo
+                    vector_trayectoria2 = centro_bola_blanca - punto_objetivo
+                    angulo = self.calcular_angulo(vector_trayectoria1, vector_trayectoria2)
+                    angulos_y_trayectorias.append((angulo, tracker_id, punto_objetivo2, punto_objetivo, centro_bola_blanca, buchaca_cercana, centro_bola))
+
+        # Ordena y selecciona la trayectoria con el ángulo más cercano a 180 grados
+        angulos_y_trayectorias.sort(key=lambda x: abs(180 - x[0]))
+        
+        # Dibuja las trayectorias no seleccionadas en rojo
+        for i, (_, _, punto_objetivo2, punto_objetivo, centro_bola_blanca, _, _) in enumerate(angulos_y_trayectorias[1:], start=1):  # Omitir la primera que es la seleccionada
+            cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
+            cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
+        
+        if angulos_y_trayectorias:
+            _, tracker_id, punto_objetivo2, punto_objetivo, centro_bola_blanca, buchaca_cercana, centro_bola = angulos_y_trayectorias[0]
+            cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
+            cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
+            cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 255, 0), 2)
+        else:
+            # Si no hay trayectorias que cumplen con la condición o están todas obstruidas, puedes decidir no dibujar nada
+            # o manejar de otra manera, como mostrar un mensaje de debug.
+            print("No se encontraron trayectorias óptimas")
+
         return frame
 
+    def encontrar_buchacas(self, mesa_corners):
+        # Asegurarse de que mesa_corners sea una lista para poder usar append
+        buchacas = mesa_corners.tolist() if isinstance(mesa_corners, np.ndarray) else mesa_corners.copy()
+
+        # Calcula las buchacas centrales en los bordes largos de la mesa
+        buchaca_central_superior = ((mesa_corners[0] + mesa_corners[1]) / 2).tolist()
+        buchaca_central_inferior = ((mesa_corners[2] + mesa_corners[3]) / 2).tolist()
+
+        # Añade las buchacas centrales a la lista
+        buchacas.extend([buchaca_central_superior, buchaca_central_inferior])
+
+        return np.array(buchacas)  # Opcionalmente, convierte la lista final a np.ndarray si es necesario para el resto de tu código
+    
+    def calcular_angulo(self, v1, v2):
+        # Normalizar los vectores
+        v1_norm = v1 / np.linalg.norm(v1)
+        v2_norm = v2 / np.linalg.norm(v2)
+        # Calcular el producto punto entre los vectores normalizados
+        producto_punto = np.dot(v1_norm, v2_norm)
+        # Calcular el ángulo en radianes y luego convertirlo a grados
+        angulo_radianes = np.arccos(np.clip(producto_punto, -1.0, 1.0))
+        angulo_grados = np.degrees(angulo_radianes)
+        return angulo_grados
+    
     def trayectoria_despejada(self, frame, centro_bola, buchaca, centros_bolas):
         # Asignar un color único para el debug visual de cada trayectoria
         color_debug = (np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
