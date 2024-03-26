@@ -52,21 +52,73 @@ class VideoProcessor:
         self.radios_acumulados = []
         self.frames_para_calculo = 100  # Número de frames durante los cuales se calculará el radio promedio
         self.frame_actual = 0
-        
-        #RECOMENDACIONES
-        self.ultimos_centros_bolas = {}  # Diccionario para rastrear la última posición conocida de cada bola
-        self.umbral_movimiento = 5.0  # Define un umbral de movimiento mínimo para actualizar la posición (puedes ajustarlo según sea necesario)
-        #RADIO DE LAS BOLAS
-        self.contador_frames = 0  # Añade un contador para los frames
-        self.radios_bolas_acumulados = []  # Para almacenar los radios de las bolas
-        self.radio_bolas_promedio = None  # Para almacenar el radio promedio
     
-    def dibujar_bandas_mesa(self, frame):
+    """def dibujar_bandas_mesa(self, frame):
         # Asume que self.mesa_corners es un np.array de esquinas ordenadas
-        n_corners = len(self.mesa_corners)
-        for i in range(n_corners):
-            # Dibuja una línea entre cada par de esquinas consecutivas
-            cv2.line(frame, tuple(self.mesa_corners[i]), tuple(self.mesa_corners[(i + 1) % n_corners]), (0, 255, 0), 2)    
+        radio = 15  # Radio del círculo a dibujar
+        color = (0, 255, 0)  # Color del círculo (verde en este caso)
+        grosor = -1  # Grosor del círculo, -1 indica que el círculo estará relleno
+
+        for esquina in self.mesa_corners:
+            # Dibuja un círculo en cada esquina
+            cv2.circle(frame, tuple(esquina), radio, color, grosor)"""
+            
+    def dibujar_bandas_mesa(self, frame):
+        if not hasattr(self, 'mesa_corners') or len(self.mesa_corners) < 4:
+            print("Esquinas de la mesa no definidas o insuficientes")
+            return None
+
+        # Tamaño fijo de las buchacas, p.ej., radio de las buchacas
+        tamano_buchaca = 20
+
+        # Ordena las esquinas si es necesario
+        esquinas_ordenadas = self.reordenar_esquinas(self.mesa_corners)
+
+        # Dibuja las buchacas y calcula su posición
+        posiciones_buchacas = self.calcular_posiciones_buchacas(esquinas_ordenadas)
+        for posicion, descripcion in posiciones_buchacas:
+            cv2.circle(frame, tuple(posicion), tamano_buchaca, (255, 0, 0), -1)
+            print(f"Posición de la buchaca: {descripcion}, Coordenadas: {posicion}, Tamaño: {tamano_buchaca}")
+            # Agrega el texto de la descripción cerca de cada buchaca
+            # Ajusta la posición del texto para que no se sobreponga con el círculo de la buchaca
+            texto_posicion = (posicion[0] + tamano_buchaca + 5, posicion[1] + tamano_buchaca + 5)
+            cv2.putText(frame, descripcion, texto_posicion, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Encuentra los puntos extremos para recortar el frame
+        x_min = np.min(esquinas_ordenadas[:, 0])
+        y_min = np.min(esquinas_ordenadas[:, 1])
+        x_max = np.max(esquinas_ordenadas[:, 0])
+        y_max = np.max(esquinas_ordenadas[:, 1])
+
+        # Recorta el frame a la región de interés
+        roi = frame[y_min:y_max, x_min:x_max]
+
+        # Guarda la ROI como una imagen
+        cv2.imwrite('mesa_recortada.jpg', roi)
+
+        return roi
+
+    def calcular_posiciones_buchacas(self, esquinas):
+        # Suponiendo que las esquinas están ordenadas en sentido horario empezando por la esquina superior izquierda
+        # Descripciones de las posiciones de las buchacas
+        descripciones = [
+            "Esquina superior izquierda",
+            "Esquina superior derecha",
+            "Esquina inferior derecha",
+            "Esquina inferior izquierda",
+            "Mitad superior",
+            "Mitad inferior"
+        ]
+
+        posiciones = [
+            (esquinas[0], descripciones[0]),  # Esquina superior izquierda
+            (esquinas[1], descripciones[1]),  # Esquina superior derecha
+            (esquinas[2], descripciones[2]),  # Esquina inferior derecha
+            (esquinas[3], descripciones[3]),  # Esquina inferior izquierda
+            ((esquinas[0] + esquinas[1]) // 2, descripciones[4]),  # Mitad superior
+            ((esquinas[2] + esquinas[3]) // 2, descripciones[5]),  # Mitad inferior
+        ]
+        return posiciones
     
     def reordenar_esquinas(self, corners):
         # Asumimos que corners es una lista de puntos (x, y) que representan las esquinas de la mesa
@@ -177,139 +229,10 @@ class VideoProcessor:
 
         detections = self.tracker.update_with_detections(valid_detections)
 
-        # Aquí puedes llamar a tu función para hacer una recomendación de tiro
-        # basada en las posiciones actuales de las bolas detectadas
-        # Necesitarás procesar 'detections' para extraer solo las detecciones de bolas
-        #centros_bolas = self.extraer_centros_bolas(detections)
-        #recomendacion_tiro = self.recomendar_tiro(centros_bolas)
-        #print("Detecciones:", detections)
-
-        self.recomendar_tiro(frame, detections, self.mesa_corners)
-        
         # Procesamiento de detecciones de bolas y taco
         self.handle_detections(frame, detections)
 
         return self.annotate_frame(frame, detections)
-
-    #RECOMENDACIONES
-    
-    def calcular_radio_promedio(self, detections):
-        if self.contador_frames < 30:
-            for i in range(len(detections.xyxy)):
-                bbox = detections.xyxy[i]
-                x1, y1, x2, y2 = bbox
-                radio = ((x2 - x1) + (y2 - y1)) / 4  # Calcula el radio como el promedio de ancho y alto
-                self.radios_bolas_acumulados.append(radio)
-            self.contador_frames += 1
-        # Calcula el radio promedio solo si aún no se ha calculado y hay suficientes datos
-        if self.contador_frames == 30 and self.radio_bolas_promedio is None:
-            self.radio_bolas_promedio = sum(self.radios_bolas_acumulados) / len(self.radios_bolas_acumulados)
-            print(f"Radio promedio calculado: {self.radio_bolas_promedio}")
-
-    def extraer_centros_bolas(self, detections):
-        centros_bolas = []
-        for i in range(len(detections.xyxy)):
-            bbox = detections.xyxy[i]
-            class_id = detections.class_id[i]
-            tracker_id = detections.tracker_id[i]
-            
-            if class_id in [0, 1]:  # Suponiendo que 0 es la bola blanca y 1 son las otras bolas
-                x1, y1, x2, y2 = bbox
-                centro_actual = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
-
-                # Verifica si el ID de la bola ya tiene una posición rastreada
-                if tracker_id in self.ultimos_centros_bolas:
-                    # Calcula la distancia entre la posición actual y la última conocida
-                    distancia = np.linalg.norm(centro_actual - self.ultimos_centros_bolas[tracker_id])
-
-                    # Si la distancia es menor que el umbral, usa la última posición conocida
-                    if distancia < self.umbral_movimiento:
-                        centro_actual = self.ultimos_centros_bolas[tracker_id]
-                    else:
-                        # Si el movimiento es significativo, actualiza la última posición conocida
-                        self.ultimos_centros_bolas[tracker_id] = centro_actual
-                else:
-                    # Si es la primera vez que se detecta la bola, añade su centro al diccionario
-                    self.ultimos_centros_bolas[tracker_id] = centro_actual
-
-                centros_bolas.append((tracker_id, class_id, centro_actual))
-
-        return centros_bolas
-    
-    def recomendar_tiro(self, frame, detections, mesa_corners):
-        if self.radio_bolas_promedio is None:
-            self.calcular_radio_promedio(detections)
-        
-        if self.radio_bolas_promedio is None:
-            print("El radio promedio de las bolas aún no ha sido calculado.")
-            return frame
-        
-        centros_bolas = self.extraer_centros_bolas(detections)
-        
-        for tracker_id, class_id, centro_bola in centros_bolas:
-            if class_id == 0:  # Continúa si la bola es blanca
-                continue
-            
-            distancia_minima = np.inf
-            buchaca_cercana = None
-            
-            for esquina in mesa_corners:
-                distancia = np.linalg.norm(centro_bola - esquina)
-                if distancia < distancia_minima:
-                    distancia_minima = distancia
-                    buchaca_cercana = esquina
-            
-            if self.trayectoria_despejada(frame, centro_bola, buchaca_cercana, [cb[2] for cb in centros_bolas if cb[0] != tracker_id]):
-                # Trayectoria despejada, dibuja en verde
-                cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 255, 0), 2)
-            else:
-                # Trayectoria obstruida, dibuja en rojo para el debug
-                cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 0, 255), 2)
-        
-        return frame
-
-    def trayectoria_despejada(self, frame, centro_bola, buchaca, centros_bolas):
-        # Asignar un color único para el debug visual de cada trayectoria
-        color_debug = (np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
-        
-        for centro_otra_bola in centros_bolas:
-            if np.array_equal(centro_bola, centro_otra_bola):
-                continue  # Ignora la bola de inicio
-                
-            # Calcular la distancia al punto más cercano en la línea y obtener dicho punto
-            distancia, punto_mas_cercano = self.calcular_distancia_y_punto_cercano(centro_bola, buchaca, centro_otra_bola)
-            
-            if distancia <= (self.radio_bolas_promedio*2):
-                # Dibuja un círculo en la bola que obstruye
-                cv2.circle(frame, tuple(np.int32(centro_otra_bola)), int(self.radio_bolas_promedio), color_debug, 2)
-                
-                # Dibuja una línea desde el centro de la bola obstructora hasta el punto de obstrucción
-                cv2.line(frame, tuple(np.int32(centro_otra_bola)), tuple(np.int32(punto_mas_cercano)), color_debug, 2)
-                
-                return False  # Trayectoria no despejada debido a la intersección
-        return True  # Trayectoria despejada
-
-    def calcular_distancia_y_punto_cercano(self, A, B, P):
-        """Calcula la distancia de un punto P a un segmento de línea AB y devuelve el punto más cercano en AB a P."""
-        # Convertir a np.array para facilitar cálculos
-        A = np.array(A)
-        B = np.array(B)
-        P = np.array(P)
-
-        AB = B - A
-        AP = P - A
-        t = np.dot(AP, AB) / np.dot(AB, AB)
-        t = max(0, min(1, t))  # Limita t para que el punto esté dentro del segmento AB
-        
-        punto_mas_cercano = A + t * AB
-        distancia = np.linalg.norm(punto_mas_cercano - P)
-
-        return distancia, punto_mas_cercano
-
-    ##Mejorar la detección del centro de las bolas ya que esta va cambiando
-    ##Mejorar los calculos de las bolas ya que estos van cambiando
-
-    #RECOMENDACIONES
 
     def filter_detections(self, detections):
         valid_detections_indices_balls = [i for i, bbox in enumerate(detections.xyxy)
@@ -606,7 +529,9 @@ class VideoProcessor:
         centros_bolas = []
 
         # Aquí dibujas las bandas de la mesa en el frame
-        #self.dibujar_bandas_mesa(frame)
+        self.dibujar_bandas_mesa(frame)
+        
+        cv2.circle(frame, (1536, 36), 25, (0, 255, 0), -1)  # Punto verde"""
         
         #CALCULAR EL RADIO DE LAS BOLAS O BOLA
         if self.frame_actual < self.frames_para_calculo:
@@ -766,15 +691,17 @@ class VideoProcessor:
             
             # Bola blanca: dibujar un círculo blanco
             if class_id == 0:  # Bola blanca
-                #cv2.circle(annotated_frame, center, radius, (255, 255, 255), 2)  # Blanco
+                cv2.circle(annotated_frame, center, radius, (255, 255, 255), 2)  # Blanco
+                print(f"La bola blanca con ID: {tracker_id} se encuentra en la posición {center} y el radio de la bola es {radius}")
                 label = f"Bola blanca #{tracker_id}"
-                #cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
             # Otras bolas: dibujar un círculo azul
             elif class_id == 1:  # Otras bolas
-                #cv2.circle(annotated_frame, center, radius, (255, 0, 0), 2)  # Azul
+                cv2.circle(annotated_frame, center, radius, (255, 0, 0), 2)  # Azul
+                print(f"La bola con ID: {tracker_id} se encuentra en la posición {center} y el radio de la bola es {radius}")
                 label = f"Bola #{tracker_id}"
-                #cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(annotated_frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         return annotated_frame
     
