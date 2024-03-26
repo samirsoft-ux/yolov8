@@ -245,7 +245,35 @@ class VideoProcessor:
             return frame
         
         centros_bolas = self.extraer_centros_bolas(detections)
+        centro_bola_blanca = None
+        # Encuentra el centro de la bola blanca
+        for tracker_id, class_id, centro_bola in centros_bolas:
+            if class_id == 0:
+                centro_bola_blanca = centro_bola
+                break
         
+        if centro_bola_blanca is None:
+            print("Bola blanca no encontrada.")
+            return frame
+        
+        # Trayectorias hacia las demás bolas
+        for tracker_id, class_id, centro_bola in centros_bolas:
+            if class_id == 0:
+                continue  # Omitir la bola blanca
+            
+            # Calcula el punto objetivo ajustado hacia atrás desde el centro de la otra bola
+            direccion_hacia_bola_blanca = (centro_bola - centro_bola_blanca) / np.linalg.norm(centro_bola - centro_bola_blanca)
+            punto_objetivo = centro_bola - direccion_hacia_bola_blanca * (self.radio_bolas_promedio * 2)
+            # Dibuja un círculo en el punto_objetivo como visualización
+            cv2.circle(frame, (int(punto_objetivo[0]), int(punto_objetivo[1])), 5, (255, 0, 0), -1)
+            if self.trayectoria_despejada(frame, centro_bola_blanca, punto_objetivo, [cb[2] for cb in centros_bolas if cb[0] != tracker_id]):
+                # Trayectoria despejada, dibuja en verde
+                cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
+            else:
+                # Trayectoria obstruida, dibuja en rojo para el debug
+                cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
+        
+        # Ahora continúa con la lógica existente para dibujar las trayectorias hacia las buchacas
         for tracker_id, class_id, centro_bola in centros_bolas:
             if class_id == 0:  # Continúa si la bola es blanca
                 continue
