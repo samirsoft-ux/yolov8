@@ -261,39 +261,48 @@ class VideoProcessor:
             if class_id == 0:
                 continue  # Omitir la bola blanca
             
-            # Calcula el punto objetivo ajustado hacia atrás desde el centro de la otra bola
-            direccion_hacia_bola_blanca = (centro_bola - centro_bola_blanca) / np.linalg.norm(centro_bola - centro_bola_blanca)
-            punto_objetivo = centro_bola - direccion_hacia_bola_blanca * (self.radio_bolas_promedio * 2)
+            distancia_minima = np.inf
+            buchaca_cercana = None
+            # Encuentra la buchaca más cercana a la bola actual
+            for esquina in mesa_corners:
+                distancia = np.linalg.norm(centro_bola - esquina)
+                if distancia < distancia_minima:
+                    distancia_minima = distancia
+                    buchaca_cercana = esquina
+
+            # Calcula la dirección hacia la buchaca más cercana
+            direccion_hacia_buchaca = (buchaca_cercana - centro_bola) / np.linalg.norm(buchaca_cercana - centro_bola)
+            
+            # Calcula el punto objetivo "atrás" desde el centro de la bola en dirección hacia la buchaca
+            punto_objetivo = centro_bola - direccion_hacia_buchaca * (self.radio_bolas_promedio * 2)
+            punto_objetivo2 = centro_bola - direccion_hacia_buchaca * (self.radio_bolas_promedio)
+            
             # Dibuja un círculo en el punto_objetivo como visualización
             cv2.circle(frame, (int(punto_objetivo[0]), int(punto_objetivo[1])), 5, (255, 0, 0), -1)
+            cv2.circle(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), 5, (255, 0, 0), -1)
+            
+            # Verifica si la trayectoria está despejada entre punto_objetivo y punto_objetivo2
+            if self.trayectoria_despejada(frame, punto_objetivo2, punto_objetivo, [cb[2] for cb in centros_bolas if cb[0] != tracker_id]):
+                # Trayectoria despejada, dibuja en verde
+                cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
+            else:
+                # Trayectoria obstruida, dibuja en rojo para el debug
+                cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
+            ###CREO QUE ACÁ NO ES NECESARIO ESTO PERO PODRÍAMOS REVISAR LOS CASOS
+            
             if self.trayectoria_despejada(frame, centro_bola_blanca, punto_objetivo, [cb[2] for cb in centros_bolas if cb[0] != tracker_id]):
                 # Trayectoria despejada, dibuja en verde
                 cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
             else:
                 # Trayectoria obstruida, dibuja en rojo para el debug
                 cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
-        
-        # Ahora continúa con la lógica existente para dibujar las trayectorias hacia las buchacas
-        for tracker_id, class_id, centro_bola in centros_bolas:
-            if class_id == 0:  # Continúa si la bola es blanca
-                continue
-            
-            distancia_minima = np.inf
-            buchaca_cercana = None
-            
-            for esquina in mesa_corners:
-                distancia = np.linalg.norm(centro_bola - esquina)
-                if distancia < distancia_minima:
-                    distancia_minima = distancia
-                    buchaca_cercana = esquina
-            
+
             if self.trayectoria_despejada(frame, centro_bola, buchaca_cercana, [cb[2] for cb in centros_bolas if cb[0] != tracker_id]):
                 # Trayectoria despejada, dibuja en verde
                 cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 255, 0), 2)
             else:
                 # Trayectoria obstruida, dibuja en rojo para el debug
                 cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 0, 255), 2)
-        
         return frame
 
     def trayectoria_despejada(self, frame, centro_bola, buchaca, centros_bolas):
