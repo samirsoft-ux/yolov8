@@ -376,10 +376,15 @@ class VideoProcessor:
             cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 0, 255), 2)
         
         if angulos_y_trayectorias:
-            _, tracker_id, punto_objetivo2, punto_objetivo, centro_bola_blanca, buchaca_cercana, centro_bola = angulos_y_trayectorias[0]
-            cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
-            cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), (0, 255, 0), 2)
-            cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), (0, 255, 0), 2)
+            for i, (angulo, tracker_id, punto_objetivo2, punto_objetivo, centro_bola_blanca, buchaca_cercana, centro_bola) in enumerate(angulos_y_trayectorias):
+                color_linea = (0, 255, 0) if i == 0 else (0, 0, 255)  # Verde para la seleccionada, rojo para las demás
+                # Dibuja las líneas
+                cv2.line(frame, (int(punto_objetivo2[0]), int(punto_objetivo2[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), color_linea, 2)
+                cv2.line(frame, (int(centro_bola_blanca[0]), int(centro_bola_blanca[1])), (int(punto_objetivo[0]), int(punto_objetivo[1])), color_linea, 2)
+                cv2.line(frame, (int(centro_bola[0]), int(centro_bola[1])), (int(buchaca_cercana[0]), int(buchaca_cercana[1])), color_linea, 2)
+                # Dibuja el ángulo como texto
+                punto_medio = ((int(punto_objetivo[0]) + int(punto_objetivo2[0])) // 2, (int(punto_objetivo[1]) + int(punto_objetivo2[1])) // 2)
+                cv2.putText(frame, f"{angulo:.2f} grados", punto_medio, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_linea, 2)
         else:
             # Si no hay trayectorias que cumplen con la condición o están todas obstruidas, puedes decidir no dibujar nada
             # o manejar de otra manera, como mostrar un mensaje de debug.
