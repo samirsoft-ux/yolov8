@@ -28,6 +28,7 @@ for x in [margeX, 1920-margeX]:
 try:
     with open('data.json', 'r') as f:
         data = json.load(f)
+        l_circle_buchaca_np1 = np.array(data["l_circle_buchaca"])
 
     for k,v in data.items():
         globals()[k]=np.array(v)
@@ -39,6 +40,14 @@ except:
                  [1920,1080]]
     l_circle_camera = l_circle_screen
     l_circle_projector = l_point_test
+    l_circle_initial = [
+    [margeX, margeY],  # Esquina superior izquierda
+    [1920 - margeX, margeY],  # Esquina superior derecha
+    [margeX, 1080 - margeY],  # Esquina inferior izquierda
+    [1920 - margeX, 1080 - margeY],  # Esquina inferior derecha
+    [1920 // 2, margeY],  # Medio superior
+    [1920 // 2, 1080 - margeY]  # Medio inferior
+]
     
 
 print("Calibraton Data:", data)
@@ -134,7 +143,6 @@ l_circle_camera=l_circle.copy()
 
 frame_camera=background.copy()
 
-
 ############### Calibration Projecteur ###############
 
 
@@ -201,6 +209,47 @@ frame_projector = background.copy()
 for p1 in l_circle_projector:
     cv2.circle(frame_projector, tuple(p1), 40, (0, 0, 255), -1)
 
+
+############### Calibration Buchaca ###############
+background = get_frame()
+
+cv2.putText(background,
+            "Click on the six points of the billard (four corners + middle top + middle bottom)!",
+            (50, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA)
+
+l_circle = l_circle_buchaca_np1 if len(l_circle_buchaca_np1) == 6 else l_circle_initial
+cv2.imshow('Billard', background)
+
+cv2.setMouseCallback('Billard', draw_circle)
+
+# Dibuja los puntos iniciales y las líneas entre ellos
+frame = background.copy()
+for i, p1 in enumerate(l_circle):
+    p1 = tuple(p1)
+    for p2 in l_circle[i + 1:]:
+        p2 = tuple(p2)
+        cv2.line(frame, p1, p2, (255, 0, 0), 3)
+    cv2.circle(frame, p1, 20, (0, 0, 255), -1)
+
+cv2.imshow('Billard', frame)
+
+cv2.waitKey(0)
+while len(l_circle) < 6:  # Espera hasta que se hayan seleccionado los seis puntos
+    cv2.waitKey(0)
+
+cv2.setMouseCallback('Billard', lambda *args: None)
+
+l_circle_buchaca = l_circle.copy()
+
+frame_camera = background.copy()
+
+# Suponiendo que l_circle_buchaca ya es una lista, conviértela primero a un numpy array para usar astype
+l_circle_buchaca_np = np.array(l_circle_buchaca).astype('int')
 
 ############### Screen ###############
 
@@ -310,9 +359,9 @@ cv2.waitKey(0)
 
 d_information={"m_projector2camera": tMat1,
                "m_camera2screen": tMat2,
-               "l_circle_projector": l_circle_projector.astype('int'),
-               "l_circle_camera": l_circle_camera.astype('int'),
-               "l_circle_screen": l_circle_screen.astype('int'),
+                "l_circle_projector": l_circle_projector.astype('int'),
+                "l_circle_camera": l_circle_camera.astype('int'),
+                "l_circle_screen": l_circle_screen.astype('int'),
         }
 """
 with open('data.pkl', 'wb') as f:
@@ -321,6 +370,13 @@ with open('data.pkl', 'wb') as f:
 
 d_information={k:v.tolist() for k,v in d_information.items()}
 
+with open('data.json', 'w') as f:
+    json.dump(d_information, f)
+
+# Agrega la información de l_circle_buchaca al diccionario existente
+d_information["l_circle_buchaca"] = l_circle_buchaca_np.tolist()
+
+# Guarda el diccionario actualizado en el archivo JSON
 with open('data.json', 'w') as f:
     json.dump(d_information, f)
 
